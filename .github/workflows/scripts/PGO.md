@@ -538,3 +538,73 @@ PR-state Cargo.toml has the managed block reverted, so a fresh
 the PGO-applied number; running `pgo-run.ts apply` against the committed
 profile re-emits the same managed block we measured.
 
+
+## Runtime benchmarks
+
+Binary size is half the story; the size knobs (`opt-level = "s"` /
+`"z"`, aggressive-size mode) trade some throughput for the bytes. To
+measure that trade-off, the toolchain wraps the project's existing
+`tests/bench/ts-react.bench.ts` (vitest) so per-variant runtime
+numbers can be captured and diffed.
+
+### Recipe
+
+```bash
+# 1) bench prep (clones rstackjs/rspack-benchcases, installs)
+pnpm run bench:prepare
+
+# 2) build the binding for whatever variant you want to measure;
+#    each subsequent measure run uses whatever binding is installed.
+pnpm run build:binding:release   # baseline = current Cargo.toml
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts \
+    bench --label baseline
+
+# 3) flip to aggressive-size, rebuild, re-bench
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts \
+    apply --aggressive-size --threshold 0.95
+pnpm run build:binding:release
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts \
+    bench --label aggressive-z-95
+
+# 4) restore Cargo.toml byte-for-byte
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts revert
+
+# 5) compare the two stored runs
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts \
+    bench-compare \
+    perf_profiles/bench-<sha>-baseline.json \
+    perf_profiles/bench-<sha>-aggressive-z-95.json
+```
+
+Each `bench` run writes `perf_profiles/bench-<git_sha>-<label>.json`
+with this shape (see `pgo-bench.ts` for the schema):
+
+```json
+{
+  "schemaVersion": 1,
+  "gitSha": "…",
+  "label": "aggressive-z-95",
+  "timestamp": "…",
+  "samples": [
+    { "name": "ts-react.bench.ts > build",   "meanMs": 12.5, "hz": 80.0,  "stdDevMs": 0.4, "samples": 10 },
+    { "name": "ts-react.bench.ts > rebuild", "meanMs": 5.25, "hz": 190.5, "stdDevMs": 0.12, "samples": 12 }
+  ]
+}
+```
+
+`bench-compare` produces a markdown table with `Δ%` per benchmark
+(negative = candidate faster) plus an overall median delta. Median is
+preferred over mean for the headline because vitest occasionally emits
+a single high-variance sample on the first iteration of a cold start.
+
+### Toolchain note (nightly is OK)
+
+The release-build profile already pins
+`channel = "nightly-2026-04-16"` (via `rust-toolchain.toml` /
+`-Zbuild-std`), and the function-level levers `#[optimize(speed)]` /
+`#[optimize(size)]` and `-Z mir-opt-level=4` / `-Z share-generics=n`
+documented above are nightly-only — so for any runtime experiment that
+turns those on, **stay on the same nightly the binding already uses**
+to avoid mixing rlibs across toolchains. The bench wrapper itself
+makes no toolchain assumption: it just runs whatever binding is in
+`crates/node_binding/`.

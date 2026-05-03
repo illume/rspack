@@ -661,3 +661,141 @@ const noProfile = `[workspace]\nmembers = ["a"]\n\n[other]\nx = 1\n`;
 assert.equal(setWorkspaceReleaseOptLevel(noProfile, "z"), noProfile);
 });
 });
+
+import {
+BENCH_SCHEMA_VERSION,
+compareBenches,
+parseVitestBenchJson,
+readBenchResult,
+renderBenchDiffMarkdown,
+writeBenchResult,
+type BenchResult,
+} from "./pgo-bench.ts";
+
+describe("pgo-bench: parseVitestBenchJson", () => {
+it("parses vitest 3.x BenchTaskResult shape with nested tasks", () => {
+const raw = JSON.stringify({
+tasks: [
+{
+name: "ts-react.bench.ts",
+tasks: [
+{
+name: "build",
+result: {
+benchmark: { mean: 12.5, hz: 80, sd: 0.4, samples: 10 },
+},
+},
+{
+name: "rebuild",
+result: {
+benchmark: { mean: 5.25, hz: 190.5, sd: 0.12, samples: 12 },
+},
+},
+],
+},
+],
+});
+const samples = parseVitestBenchJson(raw);
+assert.equal(samples.length, 2);
+const build = samples.find(s => s.name.endsWith("build"));
+assert.ok(build);
+assert.equal(build!.meanMs, 12.5);
+assert.equal(build!.hz, 80);
+assert.equal(build!.stdDevMs, 0.4);
+assert.equal(build!.samples, 10);
+});
+
+it("falls back to direct mean/hz/samples on a leaf", () => {
+const raw = JSON.stringify({
+tasks: [{ name: "x", mean: 1.5, hz: 666, samples: 3, sd: 0.01 }],
+});
+const samples = parseVitestBenchJson(raw);
+assert.equal(samples.length, 1);
+assert.equal(samples[0].meanMs, 1.5);
+});
+
+it("returns empty array for non-bench shapes", () => {
+assert.deepEqual(parseVitestBenchJson("{}"), []);
+assert.deepEqual(parseVitestBenchJson('{"tasks":[]}'), []);
+});
+});
+
+describe("pgo-bench: compareBenches", () => {
+const baseline: BenchResult = {
+schemaVersion: BENCH_SCHEMA_VERSION,
+gitSha: "aaa",
+label: "baseline",
+timestamp: "t0",
+samples: [
+{ name: "build", meanMs: 100, hz: 10, stdDevMs: 1, samples: 5 },
+{ name: "rebuild", meanMs: 50, hz: 20, stdDevMs: 0.5, samples: 5 },
+{ name: "only-baseline", meanMs: 1, hz: 1000, stdDevMs: 0, samples: 5 },
+],
+};
+const candidate: BenchResult = {
+schemaVersion: BENCH_SCHEMA_VERSION,
+gitSha: "bbb",
+label: "aggressive-z",
+timestamp: "t1",
+samples: [
+{ name: "build", meanMs: 110, hz: 9.09, stdDevMs: 1, samples: 5 },
+{ name: "rebuild", meanMs: 45, hz: 22.22, stdDevMs: 0.4, samples: 5 },
+{ name: "only-candidate", meanMs: 1, hz: 1000, stdDevMs: 0, samples: 5 },
+],
+};
+
+it("computes signed deltaPct only for shared benchmark names", () => {
+const diff = compareBenches(baseline, candidate);
+assert.equal(diff.entries.length, 2);
+const build = diff.entries.find(e => e.name === "build");
+assert.ok(build);
+assert.ok(Math.abs(build!.deltaPct - 10) < 1e-9);
+const rebuild = diff.entries.find(e => e.name === "rebuild");
+assert.ok(rebuild);
+assert.ok(Math.abs(rebuild!.deltaPct - -10) < 1e-9);
+});
+
+it("median delta picks the middle of an even-length sorted list", () => {
+const diff = compareBenches(baseline, candidate);
+// deltas = [+10, -10] sorted = [-10, +10] → median = 0
+assert.ok(Math.abs(diff.overallMedianDeltaPct) < 1e-9);
+});
+
+it("renders a stable markdown table with sign-prefixed deltas", () => {
+const md = renderBenchDiffMarkdown(compareBenches(baseline, candidate));
+assert.match(md, /\| Benchmark \|/);
+assert.match(md, /\+10\.00%/);
+assert.match(md, /-10\.00%/);
+});
+
+it("rejects zero-mean baseline rows (avoids divide-by-zero)", () => {
+const zero: BenchResult = {
+...baseline,
+samples: [{ name: "build", meanMs: 0, hz: 0, stdDevMs: 0, samples: 5 }],
+};
+const diff = compareBenches(zero, candidate);
+assert.equal(diff.entries.length, 0);
+});
+});
+
+describe("pgo-bench: writeBenchResult / readBenchResult", () => {
+it("round-trips and rejects schema-version mismatch", () => {
+const dir = mkdtempSync(join(tmpdir(), "pgo-bench-"));
+const path = join(dir, "bench-x.json");
+const r: BenchResult = {
+schemaVersion: BENCH_SCHEMA_VERSION,
+gitSha: "c",
+label: "x",
+timestamp: "t",
+samples: [{ name: "n", meanMs: 1, hz: 1000, stdDevMs: 0, samples: 1 }],
+};
+writeBenchResult(path, r);
+const back = readBenchResult(path);
+assert.deepEqual(back, r);
+
+// Tamper with the version, expect rejection on read.
+const txt = readFileSync(path, "utf8");
+writeFileSync(path, txt.replace(`"schemaVersion": ${BENCH_SCHEMA_VERSION}`, `"schemaVersion": 99`));
+assert.throws(() => readBenchResult(path), /schema mismatch/);
+});
+});

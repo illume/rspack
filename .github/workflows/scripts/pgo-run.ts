@@ -38,6 +38,14 @@ import {
 	classifyFunctions,
 	renderFunctionClassification,
 } from "./pgo-classify-functions.ts";
+import {
+	benchResultPath,
+	compareBenches,
+	readBenchResult,
+	renderBenchDiffMarkdown,
+	runBenchAndCollect,
+	writeBenchResult,
+} from "./pgo-bench.ts";
 
 function repoRoot(): string {
 	return env.REPO_ROOT ?? process.cwd();
@@ -210,6 +218,33 @@ function cmdClassifyFunctions(
 	process.stdout.write(renderFunctionClassification(result));
 }
 
+function cmdBench(label: string): string {
+	step(`bench (runtime) label=${label}`);
+	const sha = gitSha();
+	const out = benchResultPath(repoRoot(), sha, label);
+	const result = runBenchAndCollect({
+		repoRoot: repoRoot(),
+		gitSha: sha,
+		label,
+	});
+	writeBenchResult(out, result);
+	console.log(`  wrote ${out} (${result.samples.length} samples)`);
+	for (const s of result.samples) {
+		console.log(
+			`    ${s.name}: mean=${s.meanMs.toFixed(3)} ms hz=${s.hz.toFixed(2)} sd=${s.stdDevMs.toFixed(3)} ms n=${s.samples}`
+		);
+	}
+	return out;
+}
+
+function cmdBenchCompare(baselineFile: string, candidateFile: string): void {
+	step(`bench-compare ${baselineFile} vs ${candidateFile}`);
+	const a = readBenchResult(baselineFile);
+	const b = readBenchResult(candidateFile);
+	const diff = compareBenches(a, b);
+	process.stdout.write(renderBenchDiffMarkdown(diff));
+}
+
 function usage(): never {
 	console.error(
 		[
@@ -221,6 +256,8 @@ function usage(): never {
 			"  pgo-run.ts validate",
 			"  pgo-run.ts report   [--profile <path>] [--threshold <0..1>] [--functions-per-crate <N>] [--top-global <N>]",
 			"  pgo-run.ts classify-fns [--profile <path>] [--threshold <0..1>] [--restrict <crate>[,<crate>...]]",
+			"  pgo-run.ts bench    --label <name>",
+			"  pgo-run.ts bench-compare <baseline.json> <candidate.json>",
 			"  pgo-run.ts all      [--threshold <0..1>] [--hot-opt-level <lvl>] [--cold-opt-level <lvl>] -- <bench-cmd> [args...]",
 		].join("\n")
 	);
@@ -283,6 +320,20 @@ export async function main(args: string[]): Promise<void> {
 			}
 			const path = profile ?? profilePath(repoRoot(), gitSha());
 			cmdClassifyFunctions(path, fnOpts);
+			return;
+		}
+		case "bench": {
+			let label = "default";
+			for (let i = 0; i < rest.length; i++) {
+				const a = rest[i];
+				if (a === "--label") label = rest[++i];
+			}
+			cmdBench(label);
+			return;
+		}
+		case "bench-compare": {
+			if (rest.length < 2) usage();
+			cmdBenchCompare(rest[0], rest[1]);
 			return;
 		}
 		case "all": {
