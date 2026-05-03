@@ -32,6 +32,10 @@ import {
 	runProfile,
 } from "./pgo-profile.ts";
 import { buildReport, renderMarkdown } from "./pgo-report.ts";
+import {
+	classifyFunctions,
+	renderFunctionClassification,
+} from "./pgo-classify-functions.ts";
 
 function repoRoot(): string {
 	return env.REPO_ROOT ?? process.cwd();
@@ -170,6 +174,19 @@ function cmdReport(profileFile: string, opts: { threshold?: number; functionsPer
 	}));
 }
 
+function cmdClassifyFunctions(
+	profileFile: string,
+	opts: { threshold?: number; restrict?: string[] } = {}
+): void {
+	step(`classify-fns (function-level) from ${profileFile}`);
+	const profile = readProfile(profileFile);
+	const result = classifyFunctions(profile, {
+		hotCumulativeShare: opts.threshold,
+		restrictToCrates: opts.restrict,
+	});
+	process.stdout.write(renderFunctionClassification(result));
+}
+
 function usage(): never {
 	console.error(
 		[
@@ -180,6 +197,7 @@ function usage(): never {
 			"  pgo-run.ts rebuild",
 			"  pgo-run.ts validate",
 			"  pgo-run.ts report   [--profile <path>] [--threshold <0..1>] [--functions-per-crate <N>] [--top-global <N>]",
+			"  pgo-run.ts classify-fns [--profile <path>] [--threshold <0..1>] [--restrict <crate>[,<crate>...]]",
 			"  pgo-run.ts all      [--threshold <0..1>] [--hot-opt-level <lvl>] [--cold-opt-level <lvl>] -- <bench-cmd> [args...]",
 		].join("\n")
 	);
@@ -229,6 +247,19 @@ export async function main(args: string[]): Promise<void> {
 			}
 			const path = profile ?? profilePath(repoRoot(), gitSha());
 			cmdReport(path, reportOpts);
+			return;
+		}
+		case "classify-fns": {
+			const fnOpts: { threshold?: number; restrict?: string[] } = {};
+			let profile: string | undefined;
+			for (let i = 0; i < rest.length; i++) {
+				const a = rest[i];
+				if (a === "--profile") profile = rest[++i];
+				else if (a === "--threshold") fnOpts.threshold = Number(rest[++i]);
+				else if (a === "--restrict") fnOpts.restrict = rest[++i].split(",").map(s => s.trim()).filter(Boolean);
+			}
+			const path = profile ?? profilePath(repoRoot(), gitSha());
+			cmdClassifyFunctions(path, fnOpts);
 			return;
 		}
 		case "all": {

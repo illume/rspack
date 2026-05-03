@@ -521,3 +521,84 @@ assert.ok(line.length < 400, `line too long: ${line.length}`);
 }
 });
 });
+
+// -------- classifyFunctions (sub-crate, function-level) --------
+
+import {
+classifyFunctions,
+renderFunctionClassification,
+} from "./pgo-classify-functions.ts";
+
+function fnFixture(): PgoProfile {
+return {
+schema_version: PROFILE_SCHEMA_VERSION,
+git_sha: "f".repeat(40),
+created_at: "2026-05-03T00:00:00.000Z",
+rustc_version: "rustc 1.97.0-nightly",
+command: "fn-fixture",
+total_samples: 1000,
+by_crate: [],
+top_symbols: [
+// 600 samples = 60% of total, but only 60% of the *attributable* 1000 if all are attributed.
+{ symbol: "swc_ecma_minifier::Pure::visit_mut_expr", crate: "swc_ecma_minifier", samples: 600 },
+{ symbol: "hstr::Atom::eq", crate: "hstr", samples: 200 },
+{ symbol: "swc_ecma_parser::lex::next_token", crate: "swc_ecma_parser", samples: 100 },
+{ symbol: "small::cold::helper", crate: "swc_ecma_minifier", samples: 50 },
+// Unattributable kernel symbol — must be ignored.
+{ symbol: "_mi_page_malloc_zero", crate: null, samples: 200 },
+],
+};
+}
+
+describe("classifyFunctions", () => {
+it("marks the smallest top set covering >= threshold of attributable as hot", () => {
+const r = classifyFunctions(fnFixture(), { hotCumulativeShare: 0.5 });
+// Attributable total = 600+200+100+50 = 950. 50% = 475. The first
+// symbol (600) crosses the threshold by itself.
+assert.equal(r.hot.length, 1);
+assert.equal(r.hot[0].symbol, "swc_ecma_minifier::Pure::visit_mut_expr");
+assert.equal(r.cold.length, 3);
+assert.equal(r.consideredSamples, 950);
+});
+it("ignores unattributable symbols (kernel/libc) entirely", () => {
+const r = classifyFunctions(fnFixture(), { hotCumulativeShare: 0.99 });
+const allSymbols = [...r.hot, ...r.cold].map(f => f.symbol);
+assert.ok(!allSymbols.includes("_mi_page_malloc_zero"));
+});
+it("respects restrictToCrates by dropping symbols outside the set", () => {
+const r = classifyFunctions(fnFixture(), {
+hotCumulativeShare: 0.5,
+restrictToCrates: ["swc_ecma_minifier"],
+});
+const crates = new Set([...r.hot, ...r.cold].map(f => f.crate));
+assert.deepEqual([...crates], ["swc_ecma_minifier"]);
+});
+it("honours alwaysHot / alwaysCold overrides", () => {
+const r = classifyFunctions(fnFixture(), {
+hotCumulativeShare: 0.5,
+alwaysHot: ["swc_ecma_parser::lex::next_token"],
+alwaysCold: ["swc_ecma_minifier::Pure::visit_mut_expr"],
+});
+const next = [...r.hot, ...r.cold].find(
+f => f.symbol === "swc_ecma_parser::lex::next_token"
+);
+const pure = [...r.hot, ...r.cold].find(
+f => f.symbol === "swc_ecma_minifier::Pure::visit_mut_expr"
+);
+assert.equal(next?.decision, "hot");
+assert.equal(pure?.decision, "cold");
+});
+it("rejects threshold outside (0, 1]", () => {
+assert.throws(() => classifyFunctions(fnFixture(), { hotCumulativeShare: 0 }));
+assert.throws(() => classifyFunctions(fnFixture(), { hotCumulativeShare: 1.5 }));
+});
+it("renderFunctionClassification produces a markdown report with hot and cold tables", () => {
+const r = classifyFunctions(fnFixture(), { hotCumulativeShare: 0.5 });
+const md = renderFunctionClassification(r);
+assert.match(md, /## Hot/);
+assert.match(md, /## Cold/);
+assert.match(md, /optimize\(speed\)/);
+assert.match(md, /optimize\(size\)/);
+assert.match(md, /Pure::visit_mut_expr/);
+});
+});

@@ -17,6 +17,7 @@ samples instead of guesswork.
 | --- | --- |
 | `pgo-profile.ts` | Run `perf record` + `perf script`, parse, attribute samples to crates, write `perf_profiles/<sha>.json` |
 | `pgo-classify.ts` | Read a profile, classify each crate as `hot` (top of cumulative-share threshold) or `cold` |
+| `pgo-classify-functions.ts` | Function-level classifier: same algorithm but operating on `top_symbols` to identify per-function hot/cold candidates for source-level annotation (`#[inline]` / `#[cold]` / nightly `#[optimize(speed|size)]`) |
 | `pgo-apply-overrides.ts` | Write a managed `[profile.release.package.<crate>]` block into the workspace `Cargo.toml` |
 | `pgo-report.ts` | Render the **function-level** view of a stored profile: hot functions inside each hot crate, plus a global top-N hot-functions table with cumulative share |
 | `pgo-run.ts` | Driver that orchestrates the full loop |
@@ -203,6 +204,64 @@ so the action this report suggests is one of:
 2. Annotate the specific hot function with `#[inline]` /
    `#[inline(always)]` / `#[cold]` in source.
 3. Restructure the hot loop in source (the usual response).
+
+## Function-level classification (`classify-fns`)
+
+`pgo-classify-functions.ts` is the function-level analogue of the
+crate-level classifier: same cumulative-share algorithm, but operating
+on the recorded `top_symbols` instead of `by_crate`. It tells you,
+inside the hot crates, *which specific functions* are responsible for
+the CPU. That answers "top speed where it matters, smallest code
+everywhere else" at a finer granularity than Cargo can natively
+consume.
+
+```bash
+# Apply across the whole top_symbols list (default threshold 0.50):
+node --experimental-strip-types \
+  .github/workflows/scripts/pgo-run.ts classify-fns \
+  --profile perf_profiles/<sha>.json --threshold 0.50
+
+# Drill into specific hot crates:
+node --experimental-strip-types \
+  .github/workflows/scripts/pgo-run.ts classify-fns \
+  --profile perf_profiles/<sha>.json --threshold 0.50 \
+  --restrict swc_ecma_minifier,swc_ecma_ast,swc_ecma_parser
+```
+
+### Why function-level is *advisory*, not auto-applied
+
+Cargo profile overrides have package granularity: `[profile.release.package.X]`
+exists, `[profile.release.package.X.function.Y]` does not. To act on
+function-level decisions you have to add source-level attributes:
+
+| Granularity | Cargo can apply it? | Stable Rust? | Notes |
+| --- | :---: | :---: | --- |
+| Per-crate `opt-level` | ✅ | ✅ | What `pgo-apply-overrides.ts` does. |
+| Per-function `#[inline]` / `#[cold]` | ❌ source only | ✅ | Hint to LLVM. `#[cold]` shrinks code on the cold path; `#[inline(always)]` forces inlining. Doesn't change opt-level. |
+| Per-function `#[optimize(speed)]` / `#[optimize(size)]` | ❌ source only | ❌ nightly | Real per-function opt-level. Requires `#![feature(optimize_attribute)]`. |
+
+For our **own** crates (`rspack_*`) those source patches are local and
+trivial. For **third-party** crates (swc, hashbrown, indexmap, hstr —
+which dominate this profile) the only options are:
+
+- Vendor the crate via `[patch.crates-io]` and apply attributes to the
+  vendored copy. Maintenance cost: rebases on upstream releases.
+- Upstream the annotation. Slow, but the hot symbols here (e.g. the
+  visit\_mut\_expr family) are obvious, stable hot paths — a reasonable
+  upstream PR target.
+
+Practical recommendation given those constraints: keep using the
+crate-level loop (`apply --threshold 0.95` already gives **−19.19%**
+on the actually-shipped binding), use `classify-fns` to identify the
+~20 functions that account for half of attributable CPU, and:
+
+- For the ~2 hot symbols inside crates we own (e.g. `ScopeInfoDB::get`
+  in `rspack_plugin_javascript`), if they are flagged *cold* (large
+  helper inside an otherwise-hot crate), wrap with `#[cold]`. If
+  flagged *hot*, leave them alone — they're already at `opt-level=3`.
+- For third-party hot symbols, do nothing automatically. Use the list
+  to guide manual investigation with `perf annotate <symbol>` for
+  loop-level hotspots.
 
 ## Validation
 
