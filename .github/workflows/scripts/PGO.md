@@ -1,0 +1,205 @@
+# Profile-Guided opt-level overrides (`pgo-*`)
+
+A small toolchain for the **profile → store → read → optimize → rebuild → validate**
+loop on the Rspack Node binding. Lets us compile the hot path at
+`opt-level = 3` and the cold path at `opt-level = "z"` based on real perf
+samples instead of guesswork.
+
+> **Note**: Despite the name, this is **not** Rust's built-in PGO
+> (`-Cprofile-generate=` / `-Cprofile-use=`). It's a coarser, per-crate
+> opt-level tuning loop that is much cheaper to maintain (no profdata
+> binary format, no instrumented build) and that targets a different
+> trade-off — **binary size at fixed throughput**, not raw throughput.
+
+## Files
+
+| File | Role |
+| --- | --- |
+| `pgo-profile.ts` | Run `perf record` + `perf script`, parse, attribute samples to crates, write `perf_profiles/<sha>.json` |
+| `pgo-classify.ts` | Read a profile, classify each crate as `hot` (top of cumulative-share threshold) or `cold` |
+| `pgo-apply-overrides.ts` | Write a managed `[profile.release.package.<crate>]` block into the workspace `Cargo.toml` |
+| `pgo-run.ts` | Driver that orchestrates the full loop |
+| `pgo.test.ts` | Unit tests (run with `node --experimental-strip-types --test`) |
+
+All scripts run on Node ≥ 22 with native TypeScript (no compile step).
+
+## JSON schema
+
+```jsonc
+// perf_profiles/<commit-sha>.json
+{
+  "schema_version": 1,
+  "git_sha": "deadbeef…",
+  "created_at": "2026-05-03T16:45:00.000Z",
+  "rustc_version": "rustc 1.99.0-nightly (… 2026-04-16)",
+  "command": "./target/release/bench --iters 100",
+  "total_samples": 123456,
+  "by_crate": [
+    { "crate": "rspack_core",    "samples": 50000, "pct": 0.405 },
+    { "crate": "swc_ecma_parser", "samples": 20000, "pct": 0.162 },
+    { "crate": "<unknown>",       "samples":  5000, "pct": 0.040 }
+  ],
+  "top_symbols": [
+    { "symbol": "rspack_core::module::Module::build", "crate": "rspack_core", "samples": 12345 }
+  ]
+}
+```
+
+The file is committed-or-not at the user's discretion. The `git_sha` field
+makes it self-identifying so it's safe to keep many side-by-side.
+
+## End-to-end usage
+
+The driver `pgo-run.ts` exposes `profile`, `apply`, `revert`, `rebuild`,
+`validate`, and `all`. Typical flow:
+
+```bash
+# 1. Run a representative benchmark under perf and store the profile.
+#    Anything that exercises the binding works — ts-react.bench.ts is one
+#    option; a real project build is even better.
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts \
+  profile -- node tests/bench/ts-react.bench.ts
+
+# 2. Classify crates and write the managed block into Cargo.toml.
+#    Re-runnable at any time; the block is delimited by sentinel comments
+#    so it never disturbs hand-written [profile.release.package.*] sections.
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts apply
+
+# 3. Rebuild the binding with the new per-crate opt-levels.
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts rebuild
+
+# 4. Validate the artifact exists. (Re-run your benchmark afterwards
+#    to confirm perf has not regressed.)
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts validate
+
+# Or do all four in one shot:
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts \
+  all -- node tests/bench/ts-react.bench.ts
+
+# Undo: strip the managed block (keeps any hand-written overrides).
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts revert
+```
+
+## Classifier algorithm
+
+1. Sort crates by sample count, descending.
+2. Walk the list accumulating each crate's `pct`. Every crate whose
+   *previous* cumulative share was below `hotCumulativeShare` (default
+   `0.85`) is **hot**; the rest are **cold**.
+3. `<unknown>` (kernel, libc, anything we couldn't attribute) is excluded.
+4. `alwaysHot` / `alwaysCold` lists override the heuristic last — useful
+   for pinning crates we know belong in one bucket regardless of what a
+   single benchmark happened to stress.
+5. `candidates` extends the result set with crates that didn't appear in
+   the profile, defaulting them cold.
+
+The threshold is intentionally generous (`0.85`, not `0.95`): we want a
+small hot set, because every crate we leave in the hot bucket is one that
+keeps the larger `opt-level=3` codegen, and binary-size wins come from
+shrinking the cold-tail majority.
+
+## What the apply step actually emits
+
+Two-rule generator, designed to keep the diff small:
+
+- The workspace `[profile.release].opt-level` is detected automatically.
+- **Hot crates** are emitted only when the workspace default is *not* the
+  hot opt-level (`3`). On the current `[profile.release].opt-level = 3`
+  config, hot crates are no-ops and are intentionally omitted.
+- **Cold crates** always emit `opt-level = "z"`.
+
+So on today's repo state (workspace default = 3), `apply` produces a block
+that is just the cold-tail overrides:
+
+```toml
+# >>> pgo-managed-overrides >>>
+# Generated by .github/workflows/scripts/pgo-apply-overrides.ts.
+# Do not edit by hand — re-run pgo-run.ts to refresh.
+# Workspace [profile.release].opt-level detected as 3.
+
+[profile.release.package.nu_ansi_term]
+opt-level = "z"  # cold: 0.05% (below hot-share threshold)
+
+[profile.release.package.owo_colors]
+opt-level = "z"  # cold: 0.05% (below hot-share threshold)
+# <<< pgo-managed-overrides <<<
+```
+
+If we ever flip the workspace default to `"s"` globally (a separate
+decision tracked under `binary-size-experiment.yml`), the same `apply` run
+would *also* emit hot-crate overrides at `opt-level = 3` — i.e. the
+inverted shape, where hot crates earn back full vectorization on top of a
+size-default workspace.
+
+## Crate attribution
+
+`crateFromSymbol` in `pgo-profile.ts` extracts the leading crate name from
+demangled Rust symbols. Two common shapes:
+
+```
+rspack_core::module::Module::build
+                                ↑ crate = "rspack_core"
+
+<rspack_core::compilation::Compilation as rspack_core::Build>::do_build
+ ↑ implementor crate = "rspack_core"
+```
+
+Trait-impl symbols are attributed to the **implementor** (the type whose
+machine code actually runs), not the trait crate. Bracketed symbols
+without a `<… as …>` clause are unwrapped and the leading crate is
+extracted. Anything that doesn't match `[a-zA-Z_][a-zA-Z0-9_]*` (kernel
+symbols, libc, anonymous vtable entries) is bucketed under `<unknown>`
+and excluded from classification.
+
+## Validation
+
+`pgo-run.ts validate` is intentionally minimal: it just checks that the
+expected `rspack.<platform>.node` artifact exists and is non-empty after
+rebuild. The heavy lifting — confirming throughput hasn't regressed — is
+deliberately the caller's job, since "did this make us faster?" is a
+benchmark question and benchmarks vary by workload. A typical flow is:
+
+```bash
+# Snapshot baseline perf before pgo-run.
+hyperfine --warmup 3 --runs 10 'node my-bench.js' > before.txt
+
+# Apply pgo-managed overrides + rebuild.
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts all -- node my-bench.js
+
+# Re-measure and diff.
+hyperfine --warmup 3 --runs 10 'node my-bench.js' > after.txt
+diff before.txt after.txt
+```
+
+## Testing
+
+```bash
+node --experimental-strip-types --test .github/workflows/scripts/pgo.test.ts
+```
+
+21 cases covering: symbol→crate attribution (normal symbols, trait-impl
+symbols, kernel/unattributable), `perf script` parsing (LF + CRLF + empty
+input + leaf-only counting), per-crate aggregation, profile JSON
+round-trip + schema-version rejection, classifier (cumulative threshold
+boundary, `<unknown>` exclusion, `alwaysHot`/`alwaysCold` overrides,
+`candidates` fall-back, threshold range checks), managed-block render
+(workspace-default-aware emission, idempotent re-application,
+removal-leaves-manual-overrides-alone), and end-to-end file write +
+no-op-on-rerun.
+
+## Limitations / non-goals
+
+- **Not Rust PGO.** This does not use `-Cprofile-generate` /
+  `-Cprofile-use`. If you want true PGO for max throughput, see the
+  upstream
+  [Rustc Profile-Guided Optimization](https://doc.rust-lang.org/rustc/profile-guided-optimization.html)
+  docs — that's a different, complementary tool.
+- **Single platform per run.** `perf` is Linux-only; for macOS/Windows
+  use `samply` or `Instruments` and convert to `perf script`-compatible
+  output, or extend `pgo-profile.ts` with a per-platform runner.
+- **One workload.** A single benchmark profile reflects only the crates
+  that workload exercises. The driver does not automatically merge
+  profiles from multiple workloads — generate per-workload JSON files
+  and combine them by hand if you want a multi-bench view.
+- **No automatic rollback on perf regression.** `validate` checks
+  artifact existence only; you must benchmark separately.

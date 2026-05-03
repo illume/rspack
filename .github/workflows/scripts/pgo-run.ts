@@ -1,0 +1,203 @@
+// Driver: profile → store → read → optimize → rebuild → validate.
+//
+// Usage:
+//   node --experimental-strip-types pgo-run.ts profile  -- <bench-cmd> [args...]
+//   node --experimental-strip-types pgo-run.ts apply    [--profile <path>]
+//   node --experimental-strip-types pgo-run.ts revert
+//   node --experimental-strip-types pgo-run.ts all      -- <bench-cmd> [args...]
+//
+// `all` performs the full sequence:
+//   1. profile  — perf record + perf script + write perf_profiles/<sha>.json
+//   2. apply    — read profile, classify, write managed Cargo.toml block
+//   3. rebuild  — run the project's existing release build script
+//   4. validate — confirm the produced .node artifact exists and is non-empty
+//
+// Validation is intentionally minimal — the heavy benchmarking is the
+// caller's job. We only check the artifact exists; the user can re-run
+// their own benchmark afterwards to confirm perf.
+
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { argv, env, exit } from "node:process";
+
+import {
+	applyOverridesToFile,
+	removeManagedBlock,
+} from "./pgo-apply-overrides.ts";
+import { classify } from "./pgo-classify.ts";
+import {
+	profilePath,
+	readProfile,
+	runProfile,
+} from "./pgo-profile.ts";
+
+function repoRoot(): string {
+	return env.REPO_ROOT ?? process.cwd();
+}
+
+function cargoTomlPath(): string {
+	return join(repoRoot(), "Cargo.toml");
+}
+
+function gitSha(): string {
+	return execFileSync("git", ["-C", repoRoot(), "rev-parse", "HEAD"], {
+		encoding: "utf8",
+	}).trim();
+}
+
+function step(name: string): void {
+	console.log(`\n[pgo-run] ▶ ${name}`);
+}
+
+function cmdProfile(rest: string[]): string {
+	step(`profile (perf record): ${rest.join(" ")}`);
+	const { path, profile } = runProfile({
+		repoRoot: repoRoot(),
+		command: rest,
+	});
+	console.log(
+		`  wrote ${path}: ${profile.total_samples} samples, ${profile.by_crate.length} crates`
+	);
+	return path;
+}
+
+function cmdApply(profileFile: string): { hot: number; cold: number } {
+	step(`apply overrides from ${profileFile}`);
+	const profile = readProfile(profileFile);
+	const classification = classify(profile);
+	const { changed } = applyOverridesToFile(cargoTomlPath(), classification);
+	console.log(
+		`  ${changed ? "updated" : "unchanged"}: ${classification.hot.length} hot crates, ${classification.cold.length} cold crates`
+	);
+	for (const c of classification.hot.slice(0, 10)) {
+		console.log(`    hot  ${c.crate.padEnd(40)} ${(c.pct * 100).toFixed(2)}%`);
+	}
+	if (classification.hot.length > 10) {
+		console.log(`    … +${classification.hot.length - 10} more hot`);
+	}
+	return { hot: classification.hot.length, cold: classification.cold.length };
+}
+
+function cmdRevert(): void {
+	step("revert overrides");
+	const before = readFileSync(cargoTomlPath(), "utf8");
+	const after = removeManagedBlock(before);
+	if (after !== before) {
+		writeFileSync(cargoTomlPath(), after);
+		console.log("  removed managed pgo block");
+	} else {
+		console.log("  no managed pgo block present");
+	}
+}
+
+function cmdRebuild(): void {
+	step("rebuild release");
+	const r = spawnSync("pnpm", ["run", "build:binding:release"], {
+		cwd: repoRoot(),
+		stdio: "inherit",
+		env,
+	});
+	if (r.status !== 0) {
+		throw new Error(`rebuild exited ${r.status}`);
+	}
+}
+
+function cmdValidate(): void {
+	step("validate artifact");
+	// Find any rspack.<platform>.node under crates/node_binding/ or npm/.
+	// We don't hard-code the platform; just walk the obvious targets.
+	const candidates = [
+		join(repoRoot(), "crates/node_binding"),
+		join(repoRoot(), "npm"),
+	];
+	const found: string[] = [];
+	const walk = (dir: string, depth = 0) => {
+		if (!existsSync(dir) || depth > 4) return;
+		for (const ent of readdirSync(dir, { withFileTypes: true })) {
+			const p = join(dir, ent.name);
+			if (ent.isDirectory()) walk(p, depth + 1);
+			else if (ent.isFile() && ent.name.endsWith(".node")) found.push(p);
+		}
+	};
+	for (const c of candidates) walk(c);
+	if (found.length === 0) {
+		throw new Error("no .node artifact found after rebuild");
+	}
+	for (const p of found) {
+		const sz = statSync(p).size;
+		if (sz <= 0) throw new Error(`artifact ${p} is empty`);
+		console.log(`  ${p}: ${sz} bytes (${(sz / 1024 / 1024).toFixed(2)} MiB)`);
+	}
+}
+
+function usage(): never {
+	console.error(
+		[
+			"Usage:",
+			"  pgo-run.ts profile  -- <bench-cmd> [args...]",
+			"  pgo-run.ts apply    [--profile <path>]",
+			"  pgo-run.ts revert",
+			"  pgo-run.ts rebuild",
+			"  pgo-run.ts validate",
+			"  pgo-run.ts all      -- <bench-cmd> [args...]",
+		].join("\n")
+	);
+	exit(2);
+}
+
+function isMain(): boolean {
+	const url = import.meta.url;
+	return Boolean(argv[1] && url === `file://${argv[1]}`);
+}
+
+export async function main(args: string[]): Promise<void> {
+	const sub = args[0];
+	const rest = args.slice(1);
+	switch (sub) {
+		case "profile": {
+			const cmdStart = rest.indexOf("--");
+			const cmd = cmdStart === -1 ? rest : rest.slice(cmdStart + 1);
+			if (cmd.length === 0) usage();
+			cmdProfile(cmd);
+			return;
+		}
+		case "apply": {
+			const idx = rest.indexOf("--profile");
+			const path =
+				idx >= 0 && rest[idx + 1]
+					? rest[idx + 1]
+					: profilePath(repoRoot(), gitSha());
+			cmdApply(path);
+			return;
+		}
+		case "revert":
+			cmdRevert();
+			return;
+		case "rebuild":
+			cmdRebuild();
+			return;
+		case "validate":
+			cmdValidate();
+			return;
+		case "all": {
+			const cmdStart = rest.indexOf("--");
+			const cmd = cmdStart === -1 ? rest : rest.slice(cmdStart + 1);
+			if (cmd.length === 0) usage();
+			const path = cmdProfile(cmd);
+			cmdApply(path);
+			cmdRebuild();
+			cmdValidate();
+			return;
+		}
+		default:
+			usage();
+	}
+}
+
+if (isMain()) {
+	main(argv.slice(2)).catch(e => {
+		console.error(`pgo-run failed: ${(e as Error).message}`);
+		exit(1);
+	});
+}

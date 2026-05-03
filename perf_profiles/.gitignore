@@ -1,0 +1,4 @@
+# Raw perf record output is large and platform-specific; the JSON profile
+# (committed alongside, if you want to commit it) is the durable artifact.
+*.perf.data
+*.perf.data.old
