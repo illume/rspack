@@ -82,6 +82,130 @@ node --experimental-strip-types .github/workflows/scripts/pgo-run.ts \
 node --experimental-strip-types .github/workflows/scripts/pgo-run.ts revert
 ```
 
+## Aggressive-size mode (`--aggressive-size`)
+
+The default loop above keeps the workspace at `opt-level = 3` and only
+*demotes* the cold tail to `"z"`. That's conservative — it recovers
+roughly a third of the global-`z` size win at no perf cost.
+
+To go further — **`opt-level = "z"` everywhere except the hot path,
+including third-party crates** — pass `--aggressive-size`:
+
+```bash
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts \
+  apply --aggressive-size --threshold 0.95
+```
+
+This:
+
+1. Rewrites the workspace `[profile.release].opt-level = 3` line to
+   `opt-level = "z"`, tagging the original value in a
+   `# pgo-managed-original-opt-level=3` sentinel comment so `revert`
+   restores it byte-for-byte.
+2. Emits `[profile.release.package.<crate>] opt-level = 3` for every
+   classified hot crate, including third-party crates (`swc_ecma_*`,
+   `hashbrown`, `indexmap`, `hstr`, …). Cargo applies `[profile.release.package.X]`
+   to dependency crates exactly the same as workspace crates.
+3. Skips any crate that already has a hand-written
+   `[profile.release.package.X]` table to avoid TOML duplicate-key errors.
+
+`revert` reverses both halves (managed block + workspace opt-level).
+
+The `--workspace-default <lvl>`, `--hot-opt-level <lvl>`, and
+`--cold-opt-level <lvl>` flags are also independently composable if you
+want a different split (e.g. workspace `"s"`, hot `3`, cold `"z"`).
+
+## Stronger optimizations than `opt-level = 3`
+
+`rustc` itself caps `opt-level` at 3 — there is no "O4". The levers
+above 3 live in three places: **LLVM flags via `-Cllvm-args`**,
+**target-CPU/ISA selection**, and **post-link / source-attribute
+optimizations**. The honest survey:
+
+### LLVM flags via `-Cllvm-args=…`
+
+`rustc` drives LLVM, so any LLVM `-mllvm` flag can be threaded in. The
+ones that matter for size-vs-speed at fixed `opt-level=3`:
+
+| Flag | What it does | Default at O3 | Effect |
+| --- | --- | ---: | --- |
+| `-Cllvm-args=-inline-threshold=N` | Per-callsite inline cost cap | `225` | Bumping to `1000`–`5000` enables much more aggressive inlining. Costs binary size; usually wins on tight call-heavy hot loops. |
+| `-Cllvm-args=-unroll-threshold=N` | Loop-unrolling cost cap | `~150` | `300`–`1000` unrolls more loops. Big wins on inner numeric loops; near-zero gain on visitor/dispatch loops. |
+| `-Cllvm-args=-unroll-runtime` | Runtime (variable trip-count) unrolling | off | Enables unrolling loops whose trip count is only known at runtime. |
+| `-Cllvm-args=-enable-loop-distribute` | Splits one loop into several | off | Lets later passes vectorize parts that the original loop blocked. |
+| `-Cllvm-args=-enable-loop-versioning-licm` | LICM with runtime aliasing checks | off | More hoisting at the cost of a runtime guard. |
+
+These can be combined with `RUSTFLAGS` per-crate via `cargo
+--config 'profile.release.package.<crate>.rustflags=[…]'` — though
+beware: per-package `rustflags` is unstable (nightly) at the time of
+writing. The portable alternative is to set `RUSTFLAGS` globally for a
+release build.
+
+### Target-CPU / ISA
+
+`-Ctarget-cpu=native` lets LLVM use the host's full ISA (AVX-512,
+BMI2, …). Massive on numerical hot loops; **breaks portability**, so
+unusable for the shipped npm package. For shipped builds the realistic
+upper bound is `-Ctarget-cpu=x86-64-v3` (Haswell/AVX2-class), which
+NAPI-RS and `napi-rs/cli` set on some platforms by default.
+
+### Real Rust PGO (`-Cprofile-generate` / `-Cprofile-use`)
+
+This is the **actual** PGO that the toolchain in this directory is
+*not* — it instruments a build, runs it under a representative
+workload, and rebuilds with branch/inline decisions guided by sample
+data. Empirical wins on rustc itself are 10–20% throughput. Costs:
+
+- Two-build pipeline (instrumented → profile → optimized).
+- Profile data (`*.profraw`) must be merged with `llvm-profdata` and is
+  toolchain-version-sensitive.
+- Layered on top of fat-LTO it adds another 10–15 min to the release
+  build.
+
+Compatible with our crate-level `opt-level` overrides — they're
+orthogonal. Can be added later as a separate stage.
+
+### BOLT (post-link binary layout)
+
+Facebook's BOLT reorders basic blocks and functions in the linked
+binary based on sample profiles, independent of compilation. Reported
+2–8% speedups on large native binaries (clang, MySQL). Works on
+ELF/Mach-O. Two caveats for an `.npm`-shipped artifact:
+
+- BOLT mutates the binary post-link → invalidates code signatures →
+  notarization-blocking on macOS, Authenticode-stripping on Windows.
+- The reordering is profile-shaped, so a workload mismatch can
+  *regress* throughput.
+
+Linux-only-shipped use is feasible if BOLT runs in CI right before
+publish; macOS/Windows would need their own per-platform plan.
+
+### Nightly-rustc levers
+
+| Flag / attribute | Effect | Stable? |
+| --- | --- | :---: |
+| `-Z mir-opt-level=4` | Higher MIR-level optimization (default 2 at `opt-level=3`); may catch redundancies LLVM doesn't | nightly |
+| `-Z share-generics=n` | Disables sharing of generic monomorphisations across CGUs → more specialized code (size up, speed up) | nightly |
+| `#[optimize(speed)]` / `#[optimize(size)]` | Per-fn override of the active opt-level | nightly: rust-lang/rust#54882 |
+| `#[inline(always)]` | Force inline regardless of LLVM's threshold | **stable** |
+| `#[cold]` | Mark a fn as cold; LLVM treats its body as a low-priority size sink | **stable** |
+
+`#[inline(always)]` + `#[cold]` together are the only **stable** way to
+get function-level optimization decisions without nightly. The
+function-level classifier (`pgo-run.ts classify-fns`) emits both lists
+ready to drop into source.
+
+### What this PR does *not* yet wire up
+
+- LLVM flag passthrough (`-Cllvm-args=…`) — workspace `RUSTFLAGS` in
+  `crates/node_binding/scripts/build.js` is the integration point; left
+  out of the per-crate managed block because per-package `rustflags` is
+  nightly-unstable.
+- Real `-Cprofile-use` PGO — separate, larger pipeline change.
+- BOLT — post-publish step for the Linux artifact only; needs its own
+  CI hook and the symbolication-friendly unstripped build that
+  `pgo-profile` already requires.
+
 ## Classifier algorithm
 
 1. Sort crates by sample count, descending.

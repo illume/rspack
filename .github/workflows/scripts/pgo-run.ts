@@ -24,6 +24,8 @@ import { argv, env, exit } from "node:process";
 import {
 	applyOverridesToFile,
 	removeManagedBlock,
+	setWorkspaceReleaseOptLevel,
+	unsetWorkspaceReleaseOptLevel,
 } from "./pgo-apply-overrides.ts";
 import { classify } from "./pgo-classify.ts";
 import {
@@ -71,6 +73,7 @@ interface ApplyOpts {
 	threshold?: number;
 	hotOptLevel?: string;
 	coldOptLevel?: string;
+	workspaceDefault?: string;
 }
 
 function cmdApply(profileFile: string, opts: ApplyOpts = {}): { hot: number; cold: number } {
@@ -79,6 +82,16 @@ function cmdApply(profileFile: string, opts: ApplyOpts = {}): { hot: number; col
 	const classification = classify(profile, {
 		hotCumulativeShare: opts.threshold,
 	});
+	if (opts.workspaceDefault !== undefined) {
+		const before = readFileSync(cargoTomlPath(), "utf8");
+		const after = setWorkspaceReleaseOptLevel(before, opts.workspaceDefault);
+		if (after !== before) {
+			writeFileSync(cargoTomlPath(), after);
+			console.log(
+				`  workspace [profile.release].opt-level → ${opts.workspaceDefault} (original preserved in sentinel comment)`
+			);
+		}
+	}
 	const { changed } = applyOverridesToFile(cargoTomlPath(), classification, {
 		hotOptLevel: opts.hotOptLevel,
 		coldOptLevel: opts.coldOptLevel,
@@ -98,12 +111,13 @@ function cmdApply(profileFile: string, opts: ApplyOpts = {}): { hot: number; col
 function cmdRevert(): void {
 	step("revert overrides");
 	const before = readFileSync(cargoTomlPath(), "utf8");
-	const after = removeManagedBlock(before);
+	let after = removeManagedBlock(before);
+	after = unsetWorkspaceReleaseOptLevel(after);
 	if (after !== before) {
 		writeFileSync(cargoTomlPath(), after);
-		console.log("  removed managed pgo block");
+		console.log("  removed managed pgo block + restored workspace opt-level");
 	} else {
-		console.log("  no managed pgo block present");
+		console.log("  no managed pgo state present");
 	}
 }
 
@@ -156,6 +170,15 @@ function parseApplyOpts(rest: string[]): { profile: string | undefined; opts: Ap
 		else if (a === "--threshold") opts.threshold = Number(rest[++i]);
 		else if (a === "--hot-opt-level") opts.hotOptLevel = rest[++i];
 		else if (a === "--cold-opt-level") opts.coldOptLevel = rest[++i];
+		else if (a === "--workspace-default") opts.workspaceDefault = rest[++i];
+		else if (a === "--aggressive-size") {
+			// Convenience: workspace=z, hot=3, cold=z (cold becomes a no-op).
+			// Captures the user-requested "z everywhere except the hot path"
+			// configuration in a single flag.
+			opts.workspaceDefault = "z";
+			opts.hotOptLevel = opts.hotOptLevel ?? "3";
+			opts.coldOptLevel = opts.coldOptLevel ?? '"z"';
+		}
 	}
 	return { profile, opts };
 }
@@ -192,7 +215,7 @@ function usage(): never {
 		[
 			"Usage:",
 			"  pgo-run.ts profile  -- <bench-cmd> [args...]",
-			"  pgo-run.ts apply    [--profile <path>] [--threshold <0..1>] [--hot-opt-level <lvl>] [--cold-opt-level <lvl>]",
+			"  pgo-run.ts apply    [--profile <path>] [--threshold <0..1>] [--hot-opt-level <lvl>] [--cold-opt-level <lvl>] [--workspace-default <lvl>] [--aggressive-size]",
 			"  pgo-run.ts revert",
 			"  pgo-run.ts rebuild",
 			"  pgo-run.ts validate",

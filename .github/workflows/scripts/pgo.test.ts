@@ -17,6 +17,8 @@ import {
 	readWorkspaceReleaseOptLevel,
 	removeManagedBlock,
 	renderManagedBlock,
+	setWorkspaceReleaseOptLevel,
+	unsetWorkspaceReleaseOptLevel,
 	writeManagedBlock,
 } from "./pgo-apply-overrides.ts";
 import { classify } from "./pgo-classify.ts";
@@ -600,5 +602,62 @@ assert.match(md, /## Cold/);
 assert.match(md, /optimize\(speed\)/);
 assert.match(md, /optimize\(size\)/);
 assert.match(md, /Pure::visit_mut_expr/);
+});
+});
+
+// -------- setWorkspaceReleaseOptLevel / unsetWorkspaceReleaseOptLevel --------
+
+describe("setWorkspaceReleaseOptLevel / unsetWorkspaceReleaseOptLevel", () => {
+const sample = `[workspace]
+members = ["a"]
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+opt-level = 3
+strip = true
+
+[profile.release.package.regex-syntax]
+opt-level = "s"
+`;
+
+it("rewrites bare-numeric opt-level to a quoted string and tags the original", () => {
+const after = setWorkspaceReleaseOptLevel(sample, "z");
+assert.match(after, /opt-level = "z" *# pgo-managed-original-opt-level=3/);
+assert.equal(readWorkspaceReleaseOptLevel(after), "z");
+});
+
+it("revert restores the original byte-for-byte", () => {
+const flipped = setWorkspaceReleaseOptLevel(sample, "z");
+const reverted = unsetWorkspaceReleaseOptLevel(flipped);
+assert.equal(reverted, sample);
+});
+
+it("idempotent set: the original value is preserved across re-runs", () => {
+const a = setWorkspaceReleaseOptLevel(sample, "z");
+const b = setWorkspaceReleaseOptLevel(a, "s");
+// re-running with a different level should keep the *original* "3"
+// in the sentinel, not "z".
+assert.match(b, /pgo-managed-original-opt-level=3/);
+assert.equal(readWorkspaceReleaseOptLevel(b), "s");
+const reverted = unsetWorkspaceReleaseOptLevel(b);
+assert.equal(reverted, sample);
+});
+
+it("preserves CRLF line endings (Windows checkout)", () => {
+const crlf = sample.replace(/\n/g, "\r\n");
+const flipped = setWorkspaceReleaseOptLevel(crlf, "z");
+assert.ok(flipped.includes("\r\n"));
+const reverted = unsetWorkspaceReleaseOptLevel(flipped);
+assert.equal(reverted, crlf);
+});
+
+it("unset is a no-op when no sentinel is present", () => {
+assert.equal(unsetWorkspaceReleaseOptLevel(sample), sample);
+});
+
+it("does nothing when there is no [profile.release] section", () => {
+const noProfile = `[workspace]\nmembers = ["a"]\n\n[other]\nx = 1\n`;
+assert.equal(setWorkspaceReleaseOptLevel(noProfile, "z"), noProfile);
 });
 });

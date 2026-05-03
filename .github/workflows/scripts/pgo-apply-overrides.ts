@@ -3,15 +3,31 @@
 // is delimited by sentinel comments, so re-running replaces it cleanly and
 // does not disturb hand-written `[profile.release.package.*]` sections.
 //
-// Hot crates → opt-level = 3
-// Cold crates → opt-level = "z"
+// Hot crates → opt-level = 3   (configurable via --hot-opt-level)
+// Cold crates → opt-level = "z" (configurable via --cold-opt-level)
 //
 // We *only* emit overrides whose effective opt-level differs from the
-// workspace [profile.release] default (3 today). So:
-//   - hot crates are normally a no-op (omitted) since `[profile.release]`
-//     already has `opt-level = 3`. We still emit them when the user has
-//     manually flipped the workspace default to "s"/"z" globally.
-//   - cold crates always emit `opt-level = "z"`.
+// workspace [profile.release] default. So:
+//   - With the *current* workspace default `opt-level = 3`, only cold
+//     overrides are emitted (recovers ~31% of the global-z size win at
+//     fixed throughput on the SWC hot path — see PGO.md).
+//   - With the **aggressive-size** mode (`--workspace-default z`), the
+//     workspace `[profile.release].opt-level` line is rewritten to "z" and
+//     hot crates are bumped *up* to opt-level=3 in the managed block. Cold
+//     crates are no-ops because they already match the workspace default.
+//     This applies to **third-party** crates too: classification of
+//     `swc_ecma_*`, `hashbrown`, `indexmap`, etc. drives the per-package
+//     overrides exactly the same way as for first-party crates.
+//
+// `rustc` does NOT support an opt-level above 3 — there is no "O4". To
+// push *individual hot functions/loops* beyond `opt-level = 3` requires
+// source-level annotations, not Cargo profiles:
+//   - `#[inline(always)]`            (stable)
+//   - `#[cold]` on cold helpers      (stable)
+//   - `#[optimize(speed)]`           (nightly: rust-lang/rust#54882)
+// Cargo profile overrides are package-granular; see `pgo-classify-functions.ts`
+// + `PGO.md` for the function-level classifier whose output drives those
+// source-level changes.
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { argv, env, exit } from "node:process";
@@ -46,6 +62,90 @@ export function readWorkspaceReleaseOptLevel(cargoToml: string): string {
 	);
 	if (!km) return "3";
 	return km[1] ?? km[2] ?? km[3];
+}
+
+// Sentinel comment used to restore the original workspace opt-level on
+// `pgo-run.ts revert`. Survives across runs, on both LF and CRLF
+// checkouts. Stored next to the (rewritten) opt-level line.
+const WS_RESTORE_RE =
+	/[ \t]*#[ \t]*pgo-managed-original-opt-level=([^\r\n#]+?)[ \t]*(?=\r?\n|$)/;
+const WS_OPT_LINE_RE =
+	/^([ \t]*opt-level[ \t]*=[ \t]*)(\S+)([ \t]*)(#.*)?$/m;
+
+function originalOptLevelTag(level: string): string {
+	// Strip surrounding quotes for stable round-trip.
+	return ` # pgo-managed-original-opt-level=${stripQuotes(level)}`;
+}
+
+/**
+ * Rewrite the workspace `[profile.release].opt-level` line in-place,
+ * preserving the original value in a `# pgo-managed-original-opt-level=…`
+ * comment so `revert` can restore it byte-identically.
+ *
+ * Idempotent: if the file already has the sentinel comment, the original
+ * value is preserved and only the live value is updated.
+ *
+ * Returns the modified file text. If `[profile.release]` has no opt-level
+ * line at all, one is inserted.
+ */
+export function setWorkspaceReleaseOptLevel(
+	cargoToml: string,
+	newLevel: string
+): string {
+	const newToken = formatLevel(newLevel);
+	const sectionMatch = cargoToml.match(
+		/^(\[profile\.release\]\r?\n)([\s\S]*?)(?=^\[)/m
+	);
+	if (!sectionMatch) {
+		// No [profile.release] section at all — leave file alone.
+		return cargoToml;
+	}
+	const sectionBody = sectionMatch[2];
+	const optMatch = sectionBody.match(WS_OPT_LINE_RE);
+	if (!optMatch) {
+		// Insert a fresh opt-level line at the top of the section, with a
+		// restore tag for an implicit "3" default.
+		const inserted = `opt-level = ${newToken}${originalOptLevelTag("3")}\n`;
+		const newBody = inserted + sectionBody;
+		return cargoToml.replace(sectionBody, newBody);
+	}
+	const oldToken = optMatch[2];
+	const trailing = optMatch[4] ?? "";
+	const existingTag = trailing.match(WS_RESTORE_RE);
+	const originalValue = existingTag
+		? existingTag[1].trim()
+		: stripQuotes(oldToken);
+	const restored =
+		`${optMatch[1]}${newToken}${optMatch[3] ?? ""}${originalOptLevelTag(originalValue)}`;
+	const newSectionBody = sectionBody.replace(WS_OPT_LINE_RE, restored);
+	return cargoToml.replace(sectionBody, newSectionBody);
+}
+
+/**
+ * Restore the workspace `[profile.release].opt-level` to the value
+ * recorded in the `# pgo-managed-original-opt-level=…` sentinel comment,
+ * removing the comment. No-op if the comment is absent.
+ */
+export function unsetWorkspaceReleaseOptLevel(cargoToml: string): string {
+	const sectionMatch = cargoToml.match(
+		/^(\[profile\.release\]\r?\n)([\s\S]*?)(?=^\[)/m
+	);
+	if (!sectionMatch) return cargoToml;
+	const sectionBody = sectionMatch[2];
+	const optMatch = sectionBody.match(WS_OPT_LINE_RE);
+	if (!optMatch) return cargoToml;
+	const trailing = optMatch[4] ?? "";
+	const tag = trailing.match(WS_RESTORE_RE);
+	if (!tag) return cargoToml;
+	const originalValue = tag[1].trim();
+	const restoredToken = formatLevel(originalValue);
+	const cleanedTrailing = trailing.replace(WS_RESTORE_RE, "").trimEnd();
+	// If removing the sentinel left no trailing comment at all, drop the
+	// pre-comment whitespace too so the round-trip is byte-identical.
+	const ws = cleanedTrailing === "" ? "" : (optMatch[3] ?? "");
+	const restoredLine = `${optMatch[1]}${restoredToken}${ws}${cleanedTrailing}`;
+	const newSectionBody = sectionBody.replace(WS_OPT_LINE_RE, restoredLine);
+	return cargoToml.replace(sectionBody, newSectionBody);
 }
 
 /**
