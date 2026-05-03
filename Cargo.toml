@@ -395,6 +395,17 @@ opt-level = "s"
 [profile.release.package."wasi-common"]
 opt-level = "s"
 
+# Additional non-hot diagnostic/CLI-formatting crates: pulled in by tracing-subscriber
+# and miette, used only for terminal output (not on any compilation hot path).
+[profile.release.package.nu-ansi-term]
+opt-level = "s"
+
+[profile.release.package.owo-colors]
+opt-level = "s"
+
+[profile.release.package.terminal_size]
+opt-level = "s"
+
 # This is for CI build based on release but with faster build time
 [profile.ci]
 codegen-units = 256
