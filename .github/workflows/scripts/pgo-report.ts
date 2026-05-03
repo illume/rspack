@@ -74,7 +74,6 @@ export function buildReport(
 	const cls = classify(profile, {
 		hotCumulativeShare: opts.hotCumulativeShare,
 	});
-	const hotSet = new Set(cls.hot.map(c => c.crate));
 
 	// Crate-level totals so we can render each function as a fraction
 	// of its parent crate.
@@ -118,8 +117,6 @@ export function buildReport(
 			cumPct: cum / total,
 		};
 	});
-	void hotSet; // (unused; reserved for filtering when caller wants to
-	// restrict global list to hot crates only)
 
 	return {
 		totalSamples: profile.total_samples,

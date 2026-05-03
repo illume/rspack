@@ -286,16 +286,18 @@ profile: `lto="fat"`, `codegen-units=1`, `strip=true`, `panic="abort"`,
 
 **Read:** at `--threshold 0.95` the PGO loop **simultaneously preserves
 more hot crates *and* produces a smaller binary** than at `0.85`
-(47.19 MiB vs 47.48 MiB, with 18 hot vs 11 hot). The seven additional
-hot crates at the wider threshold —
+(47.19 MiB vs 47.48 MiB, with 18 hot vs 11 hot). The mechanism is
+cross-crate LTO: keeping more crates at `opt-level = 3` gives fat-LTO
+a larger contiguous region to inline and dedupe across, which on this
+workload outweighs the per-crate code-size growth from `=z` → `=3`.
+The seven additional hot crates at the wider threshold —
 `swc_ecma_codegen`, `hstr`, `swc_common`, `indexmap`, `swc_ecma_transformer`,
 `swc_ecma_transforms_typescript`, `alloc` — would have been compiled at
-`opt-level = "z"` at `0.85` and were probably preventing some
-fat-LTO inlining at the boundary; promoting them to `=3` lets LTO merge
-the call sites and dedupe code, which on this workload is a net
-size *win*. The headline PGO result we report is the `--threshold 0.95`
-build: **47,191,592 bytes, −19.19% vs baseline**, while keeping
-~92% of attributable CPU on `opt-level = 3` codegen.
+`opt-level = "z"` at `0.85`; promoting them to `=3` lets fat-LTO merge
+the call sites with the SWC visitor stack instead of treating them as
+opaque size-optimized boundaries. The headline PGO result we report is
+the `--threshold 0.95` build: **47,191,592 bytes, −19.19% vs baseline**,
+while keeping ~92% of attributable CPU on `opt-level = 3` codegen.
 
 `--threshold 0.85` recovers ~31% of the size savings of "global `"z"`"
 (−14.75% vs −46.77%); `--threshold 0.95` recovers ~41% (−19.19% vs
