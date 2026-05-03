@@ -19,6 +19,7 @@ samples instead of guesswork.
 | `pgo-classify.ts` | Read a profile, classify each crate as `hot` (top of cumulative-share threshold) or `cold` |
 | `pgo-classify-functions.ts` | Function-level classifier: same algorithm but operating on `top_symbols` to identify per-function hot/cold candidates for source-level annotation (`#[inline]` / `#[cold]` / nightly `#[optimize(speed|size)]`) |
 | `pgo-apply-overrides.ts` | Write a managed `[profile.release.package.<crate>]` block into the workspace `Cargo.toml` |
+| `pgo-patch.ts` | Cargo-patch + source rewriter: vendors third-party crates via `[patch.crates-io]`, defaults each to `#[optimize(size)]`, lifts hot fns back to `#[optimize(speed)]` (nightly `optimize_attribute`). Driven by the same profile JSON; idempotent via `// pgo-managed` sentinels |
 | `pgo-report.ts` | Render the **function-level** view of a stored profile: hot functions inside each hot crate, plus a global top-N hot-functions table with cumulative share |
 | `pgo-run.ts` | Driver that orchestrates the full loop |
 | `pgo.test.ts` | Unit tests (run with `node --experimental-strip-types --test`) |
@@ -114,6 +115,117 @@ This:
 The `--workspace-default <lvl>`, `--hot-opt-level <lvl>`, and
 `--cold-opt-level <lvl>` flags are also independently composable if you
 want a different split (e.g. workspace `"s"`, hot `3`, cold `"z"`).
+
+## Cargo-patch + source-level markers (`pgo-run.ts patch`)
+
+Cargo's `[profile.release.package.X]` is **package-granular**: the smallest
+unit it can target is a whole crate. To go finer than that — keep
+`Pure::visit_mut_expr` at full speed while shrinking every cold helper
+inside `swc_ecma_minifier` — the only mechanism Rust offers is **source
+attributes** (`#[optimize(speed)]` / `#[optimize(size)]`, nightly behind
+`#![feature(optimize_attribute)]`). For third-party crates we can't edit
+upstream, but we can vendor + override them via `[patch.crates-io]`.
+
+`pgo-run.ts patch` automates that loop end-to-end:
+
+1. **Read** the stored `perf_profiles/<sha>.json`.
+2. **Classify** every `top_symbol` as hot/cold using the same cumulative-
+   share algorithm as the crate-level classifier (default threshold 0.5
+   inside the function-level pass — see `pgo-classify-functions.ts`).
+3. **Group** hot/cold functions by their attributed crate. Drop any crate
+   that has no hot symbol — the existing crate-level pass already handles
+   pure-cold crates better.
+4. **Write** a managed `[patch.crates-io]` block into the workspace
+   `Cargo.toml`, pointing each remaining crate at `vendor/<crate>` (path
+   is configurable via `--vendor-root`). Block is delimited by
+   `# >>> pgo-managed-patch-crates-io >>>` / `# <<< … <<<` sentinels and
+   is removed byte-identically by `pgo-run.ts patch-revert`.
+5. **Optionally rewrite** the vendored sources (`--apply`) to inject:
+   - At each crate's `src/lib.rs`:
+     ```rust
+     #![feature(optimize_attribute)]
+     #![cfg_attr(not(any(test, doctest, miri)), optimize(size))]
+     ```
+     so the *default* for everything in the crate is size.
+   - Above each hot fn signature: `#[optimize(speed)] // pgo-managed`,
+     lifting just that fn back to speed codegen.
+   - Above each cold fn signature: `#[optimize(size)] // pgo-managed` —
+     redundant with the crate-level default, but kept explicit so the
+     intent is grep-able and the rewrite is verifiable.
+   The sentinel `// pgo-managed` makes the rewrite **idempotent**: re-runs
+   recognise their own work and don't double-insert.
+
+### Recipe
+
+```bash
+# 0. Build/refresh a profile against the bench harness.
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts \
+    profile -- target/release/bench
+
+# 1. Materialise vendored sources so the [patch.crates-io] paths exist.
+cargo vendor --versioned-dirs vendor
+
+# 2. Generate plan + write [patch.crates-io] + inject markers in vendor/.
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts \
+    patch --profile perf_profiles/<sha>.json --threshold 0.5 \
+          --vendor-root vendor --apply --plan-out perf_profiles/<sha>.patch-plan.json
+
+# 3. Rebuild — release build flags pin nightly already, so the
+#    `optimize_attribute` feature gate is satisfied.
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts rebuild
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts validate
+
+# 4. Bench it against the baseline.
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts bench --label patched
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts \
+    bench-compare perf_profiles/bench-<sha>-baseline.json perf_profiles/bench-<sha>-patched.json
+
+# 5. Roll back when done.
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts patch-revert
+```
+
+### What the plan looks like on the committed profile
+
+Run against `perf_profiles/bb4b6f7e2acf423926145b94eb1bea19801ee4c9.json` at
+`--threshold 0.5`: **8 third-party crates** patched, **18 hot fns** marked
+`#[optimize(speed)]`, **44 cold fns** marked `#[optimize(size)]`. Top
+crates by attributable share: `swc_ecma_minifier`, `swc_ecma_ast`,
+`swc_ecma_parser`, `swc_ecma_utils`, `swc_ecma_transforms_base`,
+`swc_ecma_transforms_optimization`, `hstr`, `hashbrown`. The full plan is
+emitted as Markdown on stdout and (with `--plan-out`) as JSON.
+
+### What this composes with
+
+`pgo-run.ts patch` writes only the `[patch.crates-io]` section. The
+existing `pgo-run.ts apply --aggressive-size` continues to write the
+`[profile.release.package.X]` overrides — they don't conflict (Cargo
+applies both). A practical full pipeline:
+
+1. `apply --aggressive-size` → workspace defaults to `=z`, hot crates get
+   pinned to `=3` at the package level. This handles the *tail* of cold
+   crates that don't appear in `top_symbols` at all.
+2. `patch --apply` → for the 8 hot crates that *do* have top symbols,
+   replace the package-level `=3` knob with the much finer source-level
+   markers, so cold helpers inside those crates also shrink.
+
+### Caveats (kept honest)
+
+- **Nightly only.** `optimize_attribute` is a feature gate. The release
+  build already pins `nightly-2026-04-16`; on stable, `cargo check` will
+  fail loudly with the well-known feature-gate error.
+- **Vendor cost.** `cargo vendor` materialises a few hundred MB of
+  third-party source under `vendor/`. The patched dir is not committed to
+  the repo; it's regenerated on demand.
+- **Symbol-name → fn-name matching.** The rewriter strips a demangled
+  symbol down to its leaf identifier (e.g.
+  `<Pure as VisitMut>::visit_mut_expr` → `visit_mut_expr`) and matches
+  `fn <name>(` in the source. Two fns sharing a name in different `impl`
+  blocks both receive the marker; this is benign for size/speed
+  decisions because they were both in the hot bucket of the *same crate*.
+- **Macro-generated fns.** Anything emitted by a `macro_rules!` invocation
+  doesn't appear as a `fn name(` token in source and is therefore skipped
+  silently. The crate-level fallback (`apply --aggressive-size`) still
+  covers it.
 
 ## Stronger optimizations than `opt-level = 3`
 

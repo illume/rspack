@@ -46,6 +46,14 @@ import {
 	runBenchAndCollect,
 	writeBenchResult,
 } from "./pgo-bench.ts";
+import {
+	applyPlanToVendoredCrate,
+	buildPatchPlan,
+	removePatchSection,
+	renderCargoPatchSection,
+	renderPlanMarkdown,
+	writePatchSection,
+} from "./pgo-patch.ts";
 
 function repoRoot(): string {
 	return env.REPO_ROOT ?? process.cwd();
@@ -125,9 +133,10 @@ function cmdRevert(): void {
 	const before = readFileSync(cargoTomlPath(), "utf8");
 	let after = removeManagedBlock(before);
 	after = unsetWorkspaceReleaseOptLevel(after);
+	after = removePatchSection(after);
 	if (after !== before) {
 		writeFileSync(cargoTomlPath(), after);
-		console.log("  removed managed pgo block + restored workspace opt-level");
+		console.log("  removed managed pgo block + restored workspace opt-level + removed [patch.crates-io] block");
 	} else {
 		console.log("  no managed pgo state present");
 	}
@@ -259,6 +268,70 @@ function cmdBenchCompare(baselineFile: string, candidateFile: string): void {
 	process.stdout.write(renderBenchDiffMarkdown(diff));
 }
 
+interface PatchOpts {
+	threshold?: number;
+	vendorRoot?: string;
+	apply?: boolean;
+	planOut?: string;
+}
+
+function cmdPatch(profileFile: string, opts: PatchOpts): void {
+	step(`patch (cargo-patch + source rewrite) from ${profileFile}`);
+	const profile = readProfile(profileFile);
+	const plan = buildPatchPlan(profile, {
+		hotCumulativeShare: opts.threshold,
+		vendorRoot: opts.vendorRoot,
+	});
+	console.log(
+		`  plan: ${plan.crates.length} crate(s), ${plan.crates.reduce((n, c) => n + c.hot.length, 0)} hot fn(s), ${plan.crates.reduce((n, c) => n + c.cold.length, 0)} cold fn(s)`
+	);
+	if (opts.planOut) {
+		writeFileSync(opts.planOut, JSON.stringify(plan, null, 2) + "\n");
+		console.log(`  wrote plan: ${opts.planOut}`);
+	}
+	// Always print a Markdown summary so a CI run leaves a readable record.
+	process.stdout.write(renderPlanMarkdown(plan));
+	// Update Cargo.toml [patch.crates-io] block.
+	const before = readFileSync(cargoTomlPath(), "utf8");
+	const after = writePatchSection(before, plan);
+	if (after !== before) {
+		writeFileSync(cargoTomlPath(), after);
+		console.log("  updated Cargo.toml [patch.crates-io] managed block");
+	} else {
+		console.log("  Cargo.toml [patch.crates-io] managed block unchanged");
+	}
+	if (opts.apply) {
+		// Rewrite vendored sources in place.
+		const vendor = opts.vendorRoot ?? plan.vendor_root;
+		const vendorAbs = vendor.startsWith("/") ? vendor : join(repoRoot(), vendor);
+		for (const c of plan.crates) {
+			const dir = join(vendorAbs, c.crate);
+			if (!existsSync(dir)) {
+				console.log(`  skip ${c.crate}: ${dir} does not exist (run 'cargo vendor' first)`);
+				continue;
+			}
+			const r = applyPlanToVendoredCrate(dir, c);
+			console.log(`  ${c.crate}: ${r.totalChanges} edit(s) across ${r.files.length} file(s)`);
+		}
+	} else {
+		console.log("  (rewrite skipped; pass --apply to inject markers into vendored sources)");
+		// Provide the snippet on stdout for reviewers.
+		process.stdout.write("\n```toml\n" + renderCargoPatchSection(plan) + "```\n");
+	}
+}
+
+function cmdPatchRevert(): void {
+	step("patch revert");
+	const before = readFileSync(cargoTomlPath(), "utf8");
+	const after = removePatchSection(before);
+	if (after !== before) {
+		writeFileSync(cargoTomlPath(), after);
+		console.log("  removed managed [patch.crates-io] block");
+	} else {
+		console.log("  no managed [patch.crates-io] block present");
+	}
+}
+
 function usage(): never {
 	console.error(
 		[
@@ -272,6 +345,8 @@ function usage(): never {
 			"  pgo-run.ts classify-fns [--profile <path>] [--threshold <0..1>] [--restrict <crate>[,<crate>...]]",
 			"  pgo-run.ts bench    --label <name>",
 			"  pgo-run.ts bench-compare <baseline.json> <candidate.json>",
+			"  pgo-run.ts patch    [--profile <path>] [--threshold <0..1>] [--vendor-root <dir>] [--apply] [--plan-out <file>]",
+			"  pgo-run.ts patch-revert",
 			"  pgo-run.ts all      [--threshold <0..1>] [--hot-opt-level <lvl>] [--cold-opt-level <lvl>] -- <bench-cmd> [args...]",
 		].join("\n")
 	);
@@ -350,6 +425,24 @@ export async function main(args: string[]): Promise<void> {
 			cmdBenchCompare(rest[0], rest[1]);
 			return;
 		}
+		case "patch": {
+			const patchOpts: PatchOpts = {};
+			let profile: string | undefined;
+			for (let i = 0; i < rest.length; i++) {
+				const a = rest[i];
+				if (a === "--profile") profile = rest[++i];
+				else if (a === "--threshold") patchOpts.threshold = Number(rest[++i]);
+				else if (a === "--vendor-root") patchOpts.vendorRoot = rest[++i];
+				else if (a === "--apply") patchOpts.apply = true;
+				else if (a === "--plan-out") patchOpts.planOut = rest[++i];
+			}
+			const path = profile ?? profilePath(repoRoot(), gitSha());
+			cmdPatch(path, patchOpts);
+			return;
+		}
+		case "patch-revert":
+			cmdPatchRevert();
+			return;
 		case "all": {
 			const cmdStart = rest.indexOf("--");
 			const flagsArgs = cmdStart === -1 ? [] : rest.slice(0, cmdStart);

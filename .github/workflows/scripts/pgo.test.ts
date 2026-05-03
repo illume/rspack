@@ -868,3 +868,224 @@ writeFileSync(path, txt.replace(`"schemaVersion": ${BENCH_SCHEMA_VERSION}`, `"sc
 assert.throws(() => readBenchResult(path), /schema mismatch/);
 });
 });
+
+// -------- pgo-patch --------
+
+import {
+ATTR_SENTINEL,
+PATCH_BEGIN_MARKER,
+PATCH_END_MARKER,
+PATCH_PLAN_SCHEMA_VERSION,
+applyPlanToVendoredCrate,
+buildPatchPlan,
+ensureLibHeader,
+extractFunctionName,
+removePatchSection,
+renderCargoPatchSection,
+rewriteSource,
+stripLibHeader,
+writePatchSection,
+type PatchPlan,
+type PatchPlanCrate,
+} from "./pgo-patch.ts";
+
+describe("extractFunctionName", () => {
+it("strips trait-impl wrappers down to the leaf fn name", () => {
+assert.equal(
+extractFunctionName(
+"<swc_ecma_minifier::compress::pure::Pure as swc_ecma_visit::generated::VisitMut>::visit_mut_expr"
+),
+"visit_mut_expr"
+);
+assert.equal(extractFunctionName("<hstr::Atom as core::cmp::PartialEq>::eq"), "eq");
+});
+it("handles plain crate::path::fn", () => {
+assert.equal(
+extractFunctionName("swc_ecma_utils::may_have_side_effects"),
+"may_have_side_effects"
+);
+});
+it("strips trailing legacy hash and generics", () => {
+assert.equal(extractFunctionName("foo::bar::h0123456789abcdef"), "bar");
+assert.equal(extractFunctionName("foo::bar<T, U>"), "bar");
+assert.equal(extractFunctionName("foo::bar::<T>"), "bar");
+});
+it("returns null on garbage", () => {
+assert.equal(extractFunctionName(""), null);
+assert.equal(extractFunctionName("$$$"), null);
+});
+});
+
+describe("buildPatchPlan", () => {
+const profile: PgoProfile = {
+schema_version: 1,
+git_sha: "x",
+created_at: "t",
+rustc_version: null,
+command: "bench",
+total_samples: 1000,
+by_crate: [],
+top_symbols: [
+{ symbol: "<swc_ecma_minifier::pure::Pure as Visit>::visit_mut_expr", crate: "swc_ecma_minifier", samples: 400 },
+{ symbol: "swc_ecma_minifier::helper::cleanup", crate: "swc_ecma_minifier", samples: 100 },
+{ symbol: "<hstr::Atom as core::cmp::PartialEq>::eq", crate: "hstr", samples: 200 },
+{ symbol: "rspack_core::module::build", crate: "rspack_core", samples: 50 },
+{ symbol: "_kernel_thing", crate: null, samples: 250 },
+],
+};
+it("groups hot/cold by crate, drops crates with no hot fn", () => {
+const plan = buildPatchPlan(profile, { hotCumulativeShare: 0.8 });
+assert.equal(plan.schema_version, PATCH_PLAN_SCHEMA_VERSION);
+const swc = plan.crates.find(c => c.crate === "swc_ecma_minifier");
+assert.ok(swc);
+assert.deepEqual(swc.hot.map(f => f.fnName).sort(), ["visit_mut_expr"]);
+assert.deepEqual(swc.cold.map(f => f.fnName).sort(), ["cleanup"]);
+assert.equal(swc.defaultDecision, "cold");
+assert.equal(swc.patchPath, "vendor/swc_ecma_minifier");
+});
+it("respects custom vendor root", () => {
+const plan = buildPatchPlan(profile, { vendorRoot: "third_party" });
+for (const c of plan.crates) {
+assert.ok(c.patchPath.startsWith("third_party/"));
+}
+});
+});
+
+describe("renderCargoPatchSection / write+remove", () => {
+const plan: PatchPlan = {
+schema_version: 1,
+created_at: "t",
+threshold: 0.5,
+vendor_root: "vendor",
+crates: [
+{ crate: "swc_ecma_minifier", patchPath: "vendor/swc_ecma_minifier", defaultDecision: "cold", hot: [{ symbol: "X", fnName: "f", pct: 0.1, decision: "hot" }], cold: [] },
+{ crate: "hstr", patchPath: "vendor/hstr", defaultDecision: "cold", hot: [{ symbol: "Y", fnName: "g", pct: 0.05, decision: "hot" }], cold: [] },
+],
+};
+it("renders sentinels + entries", () => {
+const t = renderCargoPatchSection(plan);
+assert.match(t, new RegExp(PATCH_BEGIN_MARKER));
+assert.match(t, new RegExp(PATCH_END_MARKER));
+assert.match(t, /\[patch\.crates-io\]/);
+assert.match(t, /swc_ecma_minifier = \{ path = "vendor\/swc_ecma_minifier" \}/);
+});
+it("write/remove are byte-identical for round-trip", () => {
+const before = `[workspace]\nmembers = ["a"]\n`;
+const written = writePatchSection(before, plan);
+assert.notEqual(written, before);
+const stripped = removePatchSection(written);
+assert.equal(stripped.trimEnd(), before.trimEnd());
+});
+it("write is idempotent", () => {
+const before = `[workspace]\nmembers = ["a"]\n`;
+const once = writePatchSection(before, plan);
+const twice = writePatchSection(once, plan);
+assert.equal(once, twice);
+});
+});
+
+describe("rewriteSource", () => {
+it("inserts speed attr on a hot fn and size attr on a cold fn, preserving indentation", () => {
+const src = [
+"impl Foo {",
+"    pub fn visit_mut_expr(&mut self, e: &mut Expr) {}",
+"    fn cleanup(&self) {}",
+"    fn untouched(&self) {}",
+"}",
+"",
+].join("\n");
+const { content, changed } = rewriteSource(
+src,
+new Set(["visit_mut_expr"]),
+new Set(["cleanup"])
+);
+assert.equal(changed, 2);
+assert.match(content, /    #\[optimize\(speed\)\][^\n]*\n    pub fn visit_mut_expr/);
+assert.match(content, /    #\[optimize\(size\)\][^\n]*\n    fn cleanup/);
+assert.doesNotMatch(content, /optimize[^\n]*\n\s*fn untouched/);
+});
+it("is idempotent (recognises its own sentinel)", () => {
+const src = "fn foo() {}\n";
+const hot = new Set(["foo"]);
+const once = rewriteSource(src, hot, new Set()).content;
+const twice = rewriteSource(once, hot, new Set()).content;
+assert.equal(once, twice);
+// Sentinel present.
+assert.ok(once.includes(ATTR_SENTINEL));
+});
+it("matches generic fn signatures", () => {
+const src = "fn parse<T>(input: T) {}\n";
+const { changed } = rewriteSource(src, new Set(["parse"]), new Set());
+assert.equal(changed, 1);
+});
+it("matches pub(crate) and async fn signatures", () => {
+const src = "pub(crate) async fn foo() {}\n";
+const { changed } = rewriteSource(src, new Set(["foo"]), new Set());
+assert.equal(changed, 1);
+});
+it("does nothing when no symbol matches", () => {
+const src = "fn bar() {}\n";
+const { content, changed } = rewriteSource(src, new Set(["other"]), new Set());
+assert.equal(changed, 0);
+assert.equal(content, src);
+});
+it("preserves CRLF line endings", () => {
+const src = "fn foo() {}\r\nfn bar() {}\r\n";
+const { content, changed } = rewriteSource(src, new Set(["foo"]), new Set());
+assert.equal(changed, 1);
+assert.match(content, /\r\n/);
+});
+});
+
+describe("ensureLibHeader / stripLibHeader", () => {
+it("inserts header on a clean file and is idempotent", () => {
+const src = "//! crate\n";
+const once = ensureLibHeader(src, "cold");
+const twice = ensureLibHeader(once, "cold");
+assert.equal(once, twice);
+assert.match(once, /#!\[feature\(optimize_attribute\)\]/);
+assert.match(once, /optimize\(size\)/);
+});
+it("updates the default decision in place", () => {
+const src = ensureLibHeader("//! crate\n", "cold");
+const updated = ensureLibHeader(src, "hot");
+assert.match(updated, /optimize\(speed\)/);
+assert.doesNotMatch(updated, /optimize\(size\)/);
+});
+it("strip removes only the managed header", () => {
+const src = ensureLibHeader("//! crate\n", "cold");
+const back = stripLibHeader(src);
+assert.equal(back, "//! crate\n");
+});
+});
+
+describe("applyPlanToVendoredCrate", () => {
+it("walks .rs files via injected io and applies edits", () => {
+const files: Record<string, string> = {
+"/v/swc/src/lib.rs": "//! crate\nfn driver() {}\n",
+"/v/swc/src/visit.rs": "pub fn visit_mut_expr() {}\nfn helper() {}\n",
+"/v/swc/src/skip.rs": "fn untouched() {}\n",
+};
+const writes: Record<string, string> = {};
+const planCrate: PatchPlanCrate = {
+crate: "swc",
+patchPath: "vendor/swc",
+defaultDecision: "cold",
+hot: [{ symbol: "x::visit_mut_expr", fnName: "visit_mut_expr", pct: 0.1, decision: "hot" }],
+cold: [{ symbol: "x::helper", fnName: "helper", pct: 0.01, decision: "cold" }],
+};
+const result = applyPlanToVendoredCrate("/v/swc", planCrate, {
+readFile: p => files[p],
+writeFile: (p, c) => { writes[p] = c; },
+listFiles: () => Object.keys(files),
+});
+assert.ok(result.totalChanges > 0);
+// lib.rs gets the header.
+assert.match(writes["/v/swc/src/lib.rs"], /#!\[feature\(optimize_attribute\)\]/);
+// visit.rs gets both annotations.
+assert.match(writes["/v/swc/src/visit.rs"], /#\[optimize\(speed\)\][^\n]*\n\s*pub fn visit_mut_expr/);
+assert.match(writes["/v/swc/src/visit.rs"], /#\[optimize\(size\)\][^\n]*\n\s*fn helper/);
+// skip.rs has no matching name; content should be unchanged.
+assert.equal(writes["/v/swc/src/skip.rs"] ?? files["/v/swc/src/skip.rs"], files["/v/swc/src/skip.rs"]);
+});
+});
