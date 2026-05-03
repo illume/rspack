@@ -77,11 +77,13 @@ function cmdProfile(rest: string[]): string {
 	return path;
 }
 
-interface ApplyOpts {
+export interface ApplyOpts {
 	threshold?: number;
 	hotOptLevel?: string;
 	coldOptLevel?: string;
 	workspaceDefault?: string;
+	alwaysHot?: string[];
+	alwaysCold?: string[];
 }
 
 function cmdApply(profileFile: string, opts: ApplyOpts = {}): { hot: number; cold: number } {
@@ -89,6 +91,8 @@ function cmdApply(profileFile: string, opts: ApplyOpts = {}): { hot: number; col
 	const profile = readProfile(profileFile);
 	const classification = classify(profile, {
 		hotCumulativeShare: opts.threshold,
+		alwaysHot: opts.alwaysHot,
+		alwaysCold: opts.alwaysCold,
 	});
 	if (opts.workspaceDefault !== undefined) {
 		const before = readFileSync(cargoTomlPath(), "utf8");
@@ -169,7 +173,7 @@ function cmdValidate(): void {
 	}
 }
 
-function parseApplyOpts(rest: string[]): { profile: string | undefined; opts: ApplyOpts } {
+export function parseApplyOpts(rest: string[]): { profile: string | undefined; opts: ApplyOpts } {
 	const opts: ApplyOpts = {};
 	let profile: string | undefined;
 	for (let i = 0; i < rest.length; i++) {
@@ -179,6 +183,16 @@ function parseApplyOpts(rest: string[]): { profile: string | undefined; opts: Ap
 		else if (a === "--hot-opt-level") opts.hotOptLevel = rest[++i];
 		else if (a === "--cold-opt-level") opts.coldOptLevel = rest[++i];
 		else if (a === "--workspace-default") opts.workspaceDefault = rest[++i];
+		else if (a === "--always-hot") {
+			opts.alwaysHot = (opts.alwaysHot ?? []).concat(
+				rest[++i].split(",").map(s => s.trim()).filter(Boolean)
+			);
+		}
+		else if (a === "--always-cold") {
+			opts.alwaysCold = (opts.alwaysCold ?? []).concat(
+				rest[++i].split(",").map(s => s.trim()).filter(Boolean)
+			);
+		}
 		else if (a === "--aggressive-size") {
 			// Convenience: workspace=z, hot=3, cold=z (cold becomes a no-op).
 			// Captures the user-requested "z everywhere except the hot path"
@@ -250,7 +264,7 @@ function usage(): never {
 		[
 			"Usage:",
 			"  pgo-run.ts profile  -- <bench-cmd> [args...]",
-			"  pgo-run.ts apply    [--profile <path>] [--threshold <0..1>] [--hot-opt-level <lvl>] [--cold-opt-level <lvl>] [--workspace-default <lvl>] [--aggressive-size]",
+			"  pgo-run.ts apply    [--profile <path>] [--threshold <0..1>] [--hot-opt-level <lvl>] [--cold-opt-level <lvl>] [--workspace-default <lvl>] [--aggressive-size] [--always-hot <crate>[,<crate>...]] [--always-cold <crate>[,<crate>...]]",
 			"  pgo-run.ts revert",
 			"  pgo-run.ts rebuild",
 			"  pgo-run.ts validate",

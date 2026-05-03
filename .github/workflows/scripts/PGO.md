@@ -675,3 +675,50 @@ promote — re-running `pgo-profile.ts` against the bench harness
 itself (instead of the legacy committed profile) would shorten that
 gap. The size win is real and the throughput cost is small; whether
 to ship is a product judgment, not a measurement question.
+
+### Diagnosing and mitigating the bench regressions
+
+The committed profile (`bb4b6f7e…json`) was recorded against an
+SWC-minification-heavy build, which dominates the call graph. As a
+result, crates that the JS-side bench harness exercises heavily —
+but that don't appear in the minifier's call graph — get classified
+**cold** and dropped to `opt-level = "z"`. Concretely from the
+profile:
+
+| Crate exercised by regressed benches | Profile share | 0.95 classification |
+| --- | ---: | --- |
+| `rspack_core` (ModuleGraph / ChunkGraph / Stats / NormalModule) | 0.44% | cold |
+| `rspack_napi` (NAPI bridge for every JS getter) | (below sample threshold) | cold |
+| `rspack_resolver` (used by `external getResolve`) | 0.10% | cold |
+| `rspack_loader_runner`, `rspack_collections`, `rspack_paths`, `rspack_fs` | ≤ 0.03% each | cold |
+
+The seven regressed benches all hit one or more of the above. So the
+mitigation without re-profiling is to force-promote them to hot via
+the new `--always-hot` flag on `pgo-run.ts apply`:
+
+```bash
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts \
+    apply --aggressive-size --threshold 0.95 \
+    --always-hot rspack_core,rspack_napi,rspack_resolver,rspack_loader_runner,rspack_collections,rspack_paths,rspack_fs \
+    --profile perf_profiles/bb4b6f7e2acf423926145b94eb1bea19801ee4c9.json
+```
+
+This keeps the workspace default at `opt-level = "z"` (so the
+minifier and other long-tail crates still shrink) but pins the
+graph-traversal / NAPI-bridge crates back to `opt-level = 3`, which
+is what those bench paths actually need.
+
+The cleaner fix is to re-record the profile against a workload that
+includes the bench harness itself (or any other JS-API-heavy
+workload) so the classifier picks these crates up automatically:
+
+```bash
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts \
+    profile -- pnpm --filter "@rspack/test-tools" run bench
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts \
+    apply --aggressive-size --threshold 0.95
+```
+
+`--always-hot` is the surgical override; re-profiling is the
+correct general answer.
+

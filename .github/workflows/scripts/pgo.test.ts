@@ -22,6 +22,7 @@ import {
 	writeManagedBlock,
 } from "./pgo-apply-overrides.ts";
 import { classify } from "./pgo-classify.ts";
+import { parseApplyOpts } from "./pgo-run.ts";
 import {
 	PROFILE_SCHEMA_VERSION,
 	aggregateByCrate,
@@ -246,6 +247,37 @@ describe("classify", () => {
 		const p = makeProfile([["a", 1]]);
 		assert.throws(() => classify(p, { hotCumulativeShare: 0 }));
 		assert.throws(() => classify(p, { hotCumulativeShare: 1.5 }));
+	});
+});
+
+// -------- parseApplyOpts (CLI flag wiring) --------
+
+describe("parseApplyOpts", () => {
+	it("parses --always-hot / --always-cold as comma-separated lists", () => {
+		const { opts } = parseApplyOpts([
+			"--always-hot", "rspack_core,rspack_napi",
+			"--always-cold", "miette",
+		]);
+		assert.deepEqual(opts.alwaysHot, ["rspack_core", "rspack_napi"]);
+		assert.deepEqual(opts.alwaysCold, ["miette"]);
+	});
+	it("accumulates repeated --always-hot flags and trims whitespace", () => {
+		const { opts } = parseApplyOpts([
+			"--always-hot", " rspack_core , rspack_napi ",
+			"--always-hot", "rspack_resolver",
+		]);
+		assert.deepEqual(opts.alwaysHot, [
+			"rspack_core", "rspack_napi", "rspack_resolver",
+		]);
+	});
+	it("--aggressive-size composes with --always-hot", () => {
+		const { opts } = parseApplyOpts([
+			"--aggressive-size",
+			"--always-hot", "rspack_core",
+		]);
+		assert.equal(opts.workspaceDefault, "z");
+		assert.equal(opts.hotOptLevel, "3");
+		assert.deepEqual(opts.alwaysHot, ["rspack_core"]);
 	});
 });
 
