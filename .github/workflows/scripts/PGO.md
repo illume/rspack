@@ -83,9 +83,11 @@ node --experimental-strip-types .github/workflows/scripts/pgo-run.ts revert
 ## Classifier algorithm
 
 1. Sort crates by sample count, descending.
-2. Walk the list accumulating each crate's `pct`. Every crate whose
-   *previous* cumulative share was below `hotCumulativeShare` (default
-   `0.85`) is **hot**; the rest are **cold**.
+2. Walk the list accumulating each crate's `pct`, **normalized against the
+   sum of attributable (non-`<unknown>`) crate shares** so a large kernel /
+   libc / JIT bucket can't make the threshold unreachable. Every crate
+   whose *previous* normalized cumulative share was below
+   `hotCumulativeShare` (default `0.85`) is **hot**; the rest are **cold**.
 3. `<unknown>` (kernel, libc, anything we couldn't attribute) is excluded.
 4. `alwaysHot` / `alwaysCold` lists override the heuristic last — useful
    for pinning crates we know belong in one bucket regardless of what a
@@ -203,3 +205,77 @@ no-op-on-rerun.
   and combine them by hand if you want a multi-bench view.
 - **No automatic rollback on perf regression.** `validate` checks
   artifact existence only; you must benchmark separately.
+
+## Empirical run on the actual binding
+
+Profile: `perf_profiles/bb4b6f7e2acf423926145b94eb1bea19801ee4c9.json`
+(18,558 samples, 96 attributable crates, ts-react fixture × 100, recorded
+under `perf record -F 999 -g --call-graph dwarf`).
+
+Classifier output at the default `--threshold 0.85` (after the `<unknown>`
+normalization fix): **11 crates hot** (cumulative 67.84% of attributable
+samples — `swc_ecma_minifier`, `swc_ecma_ast`, `swc_ecma_parser`,
+`swc_ecma_transforms_base`, `hashbrown`, `swc_ecma_utils`,
+`swc_ecma_compat_es2015`, `swc_ecma_transforms_optimization`,
+`rspack_plugin_javascript`, `core`, `swc_ecma_codegen`),
+**84 crates cold** (long tail dropped to `opt-level = "z"`).
+
+Real `librspack_node.so` cdylib (Linux x86_64, full production release
+profile: `lto="fat"`, `codegen-units=1`, `strip=true`, `panic="abort"`,
+`-Zbuild-std=panic_abort,std`, `-Cforce-unwind-tables=no`,
+`--features plugin,info-level`, toolchain `nightly-2026-04-16`):
+
+| Variant | Bytes | MiB | % of baseline | Δ |
+| --- | ---: | ---: | ---: | ---: |
+| baseline (workspace `opt-level = 3`, no managed block) | 58,397,088 | 55.69 | 100.00% | — |
+| **PGO-applied** (11 hot, 84 cold at `opt-level = "z"`) | **49,782,056** | **47.48** | **85.25%** | **−8,615,032 B (−8.21 MiB, −14.75%)** |
+| `opt-level = "s"` global (no PGO, every dep) | 37,681,064 | 35.94 | 64.53% | −20,716,024 B (−35.47%) |
+| `opt-level = "z"` global (no PGO, every dep) | 31,086,120 | 29.65 | 53.23% | −27,310,968 B (−46.77%) |
+
+**Read:** PGO recovers ~31% of the size savings of "global `opt-level = "z"`"
+(−14.75% vs −46.77%) while keeping the SWC hot path at full `opt-level = 3`
+codegen. The remaining ~32 MB gap to the global-`z` build is the size
+contribution of the 11 hot crates we deliberately did *not* shrink, plus
+the parts of `<unknown>` (kernel/libc/JIT, ~19% of samples) that aren't
+attributable to a Rust crate at all.
+
+The trade-off:
+
+- **Global `"z"`** — biggest size win (−46.8%) but every dependency,
+  including the SWC hot path, gets the smaller-but-slower codegen.
+- **PGO-applied** — smaller size win (−14.8%) but the hot 67.84% of CPU
+  time still runs at `opt-level = 3`. Expect roughly baseline throughput on
+  workloads similar to the profiled benchmark (TS/React with SWC), and
+  some throughput regression on workloads that hit the cold-tail crates
+  (regex-heavy passes, hashing, etc.).
+
+The numbers above are produced by running, in order, from a clean repo:
+
+```bash
+# baseline
+RUSTFLAGS="-Cforce-unwind-tables=no" cargo +nightly-2026-04-16 build \
+    --release -p rspack_node \
+    --target x86_64-unknown-linux-gnu \
+    -Zbuild-std=panic_abort,std \
+    --no-default-features --features plugin,info-level
+stat -c '%s' target/x86_64-unknown-linux-gnu/release/librspack_node.so
+# → 58,397,088
+
+# pgo-applied
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts apply \
+    --profile perf_profiles/bb4b6f7e2acf423926145b94eb1bea19801ee4c9.json
+RUSTFLAGS="-Cforce-unwind-tables=no" cargo +nightly-2026-04-16 build \
+    --release -p rspack_node \
+    --target x86_64-unknown-linux-gnu \
+    -Zbuild-std=panic_abort,std \
+    --no-default-features --features plugin,info-level
+stat -c '%s' target/x86_64-unknown-linux-gnu/release/librspack_node.so
+# → 49,782,056
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts revert
+```
+
+PR-state Cargo.toml has the managed block reverted, so a fresh
+`pnpm run build:binding:release` reproduces the baseline number, not
+the PGO-applied number; running `pgo-run.ts apply` against the committed
+profile re-emits the same managed block we measured.
+

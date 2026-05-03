@@ -82,10 +82,17 @@ export function classify(
 	const sorted: CrateAggregate[] = [...profile.by_crate].sort(
 		(a, b) => b.samples - a.samples
 	);
+	// Normalize against attributable (non-<unknown>) samples so that a large
+	// `<unknown>` bucket (kernel/libc/JIT) doesn't make the threshold
+	// unreachable and force every crate into the hot set.
+	const attributableTotal = sorted
+		.filter(c => c.crate !== "<unknown>")
+		.reduce((sum, c) => sum + c.pct, 0);
+	const norm = attributableTotal > 0 ? attributableTotal : 1;
 	for (const c of sorted) {
 		if (c.crate === "<unknown>") continue;
 		const wasUnderThreshold = cumulative < share;
-		cumulative += c.pct;
+		cumulative += c.pct / norm;
 		decisions.set(c.crate, {
 			crate: c.crate,
 			decision: wasUnderThreshold ? "hot" : "cold",
