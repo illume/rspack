@@ -193,9 +193,11 @@ describe("classify", () => {
 		]);
 		const r = classify(p, { hotCumulativeShare: 0.85 });
 		const hotNames = r.hot.map(c => c.crate);
-		// rspack_core (0.60) + swc_parser (0.80) — both come from "before the
-		// threshold is crossed" (i.e. cumulative was < 0.85 when each was
-		// considered). regex pushes us to 0.90 and is the first cold crate.
+		// rspack_core (cumulative 0.00 → 0.60), swc_parser (0.60 → 0.80), and
+		// regex (0.80 → 0.90) are each evaluated when the *prior* cumulative
+		// share was still < 0.85, so all three end up hot. nu_ansi_term
+		// (cumulative 0.90 at decision time) is the first to fall below the
+		// threshold and is cold.
 		assert.deepEqual(hotNames, ["rspack_core", "swc_parser", "regex"]);
 		const coldNames = r.cold.map(c => c.crate);
 		assert.deepEqual(coldNames, ["nu_ansi_term", "owo_colors"]);
@@ -248,6 +250,26 @@ panic     = "abort"
 [profile.release.package.regex-syntax]
 opt-level = "s"
 `;
+
+describe("readWorkspaceReleaseOptLevel", () => {
+	it("recognizes double-quoted, single-quoted, and bare-token forms", () => {
+		const dq = MINI_CARGO; // `opt-level = 3`
+		assert.equal(readWorkspaceReleaseOptLevel(dq), "3");
+		assert.equal(
+			readWorkspaceReleaseOptLevel(MINI_CARGO.replace("opt-level = 3", 'opt-level = "s"')),
+			"s"
+		);
+		assert.equal(
+			readWorkspaceReleaseOptLevel(MINI_CARGO.replace("opt-level = 3", "opt-level = 's'")),
+			"s"
+		);
+	});
+	it("returns '3' as default when the section or key is missing", () => {
+		assert.equal(readWorkspaceReleaseOptLevel("[workspace]\nmembers = []\n[a]\n"), "3");
+		const noKey = MINI_CARGO.replace(/^opt-level = 3\n/m, "");
+		assert.equal(readWorkspaceReleaseOptLevel(noKey), "3");
+	});
+});
 
 describe("renderManagedBlock", () => {
 	it("emits cold-crate overrides and skips hot when default == 3", () => {

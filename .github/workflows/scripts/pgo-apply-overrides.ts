@@ -32,7 +32,8 @@ function escapeRe(s: string): string {
 
 /**
  * Parse the workspace [profile.release] opt-level. Defaults to "3" if not
- * set or if the section is missing.
+ * set or if the section is missing. Recognizes double-quoted, single-quoted
+ * (TOML literal strings), and bare-token forms.
  */
 export function readWorkspaceReleaseOptLevel(cargoToml: string): string {
 	const m = cargoToml.match(
@@ -40,9 +41,11 @@ export function readWorkspaceReleaseOptLevel(cargoToml: string): string {
 	);
 	if (!m) return "3";
 	const body = m[1];
-	const km = body.match(/^\s*opt-level\s*=\s*(?:"([^"]+)"|(\S+))/m);
+	const km = body.match(
+		/^\s*opt-level\s*=\s*(?:"([^"]+)"|'([^']+)'|(\S+))/m
+	);
 	if (!km) return "3";
-	return km[1] ?? km[2];
+	return km[1] ?? km[2] ?? km[3];
 }
 
 export interface RenderOptions {
