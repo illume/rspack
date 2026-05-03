@@ -234,11 +234,16 @@ describe("applyVariant", () => {
 			const newLfOnly = (r.cargoToml.match(/(?<!\r)\n/g) ?? []).length;
 			assert.equal(newLfOnly, baseLfOnly, `${v} must not introduce bare LF lines`);
 		}
-		// The build.js variants drop a line; ensure they still locate it.
+		// The build.js variants drop a line; ensure they still locate it AND
+		// preserve CRLF endings on remaining lines (no bare LF introduced).
 		const noBuildStd = applyVariant("no-build-std", crlfCargo, crlfBuildJs);
 		assert.equal(noBuildStd.buildJs.includes("Zbuild-std"), false);
+		assert.ok(noBuildStd.buildJs.includes("\r\n"), "no-build-std must keep CRLF");
+		assert.equal(/(?<!\r)\n/.test(noBuildStd.buildJs), false, "no-build-std must not introduce bare LF");
 		const noInfo = applyVariant("no-info-level", crlfCargo, crlfBuildJs);
 		assert.equal(noInfo.buildJs.includes('features.push("info-level")'), false);
+		assert.ok(noInfo.buildJs.includes("\r\n"), "no-info-level must keep CRLF");
+		assert.equal(/(?<!\r)\n/.test(noInfo.buildJs), false, "no-info-level must not introduce bare LF");
 	});
 });
 
