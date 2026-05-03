@@ -46,31 +46,69 @@ permissions:
 
 jobs:
   # -------------------------------------------------------------------------
-  # Helper unit tests. Cheap (only a Node install + node:test). Runs on every
+  # Helper unit tests. Cheap (only a Node install + node:test). One job per
   # supported runner OS so that platform-specific paths in the helpers
-  # (filesystem casing, `strip` invocation, path separators) are exercised.
-  # The experiment jobs `needs: [test]`, so a failure here aborts the matrix.
+  # (filesystem casing, `strip` invocation, path separators, CRLF line
+  # endings on Windows checkout) are exercised independently.
+  #
+  # The three jobs are intentionally NOT a single matrix: each experiment
+  # platform `needs:` only its own test job, so a Windows-only test failure
+  # does not block the Linux experiment matrix from running, and vice versa.
   # -------------------------------------------------------------------------
-  test:
-    name: 'test: ${{ matrix.os }}'
-    runs-on: ${{ matrix.os }}
+  test_linux:
+    name: 'test: ubuntu-latest'
+    runs-on: ubuntu-latest
     timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-14, windows-latest]
     defaults:
       run:
         shell: bash
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
       - name: Use Node 22
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Run helper unit tests
+        run: |
+          node --version
+          node --experimental-strip-types --test \
+            .github/workflows/scripts/binary-size-experiment.test.ts
 
+  test_macos:
+    name: 'test: macos-14'
+    runs-on: macos-14
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Use Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run helper unit tests
+        run: |
+          node --version
+          node --experimental-strip-types --test \
+            .github/workflows/scripts/binary-size-experiment.test.ts
+
+  test_windows:
+    name: 'test: windows-latest'
+    runs-on: windows-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Use Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - name: Run helper unit tests
         run: |
           node --version
@@ -82,7 +120,7 @@ jobs:
   # -------------------------------------------------------------------------
   linux:
     name: 'linux: ${{ matrix.variant }}'
-    needs: [test]
+    needs: [test_linux]
     if: ${{ inputs.run_experiments != false && (github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -164,7 +202,7 @@ jobs:
   # -------------------------------------------------------------------------
   macos:
     name: 'macos: ${{ matrix.variant }}'
-    needs: [test]
+    needs: [test_macos]
     if: ${{ inputs.run_experiments != false && inputs.run_macos != false && (github.event_name != 'pull_request') }}
     runs-on: macos-14
     timeout-minutes: 90
@@ -229,7 +267,7 @@ jobs:
   # -------------------------------------------------------------------------
   windows:
     name: 'windows: ${{ matrix.variant }}'
-    needs: [test]
+    needs: [test_windows]
     if: ${{ inputs.run_experiments != false && inputs.run_windows != false && (github.event_name != 'pull_request') }}
     runs-on: windows-latest
     timeout-minutes: 120

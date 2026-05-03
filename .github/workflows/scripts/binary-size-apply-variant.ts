@@ -46,7 +46,9 @@ export function patchReleaseKey(
 ): string {
 	// Section body = everything from `[profile.release]\n` up to the next
 	// top-level `[...]` header. Crucially, this stops at `[profile.release.package.*]`.
-	const sectionRe = /(?<header>^\[profile\.release\]\n)(?<body>[\s\S]*?)(?=^\[)/m;
+	// `\r?\n` so this works equally on Windows runners where actions/checkout
+	// writes Cargo.toml with CRLF line endings.
+	const sectionRe = /(?<header>^\[profile\.release\]\r?\n)(?<body>[\s\S]*?)(?=^\[)/m;
 	const m = src.match(sectionRe);
 	if (!m || !m.groups) {
 		throw new Error("[profile.release] not found");

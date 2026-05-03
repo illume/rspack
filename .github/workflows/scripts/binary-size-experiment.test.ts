@@ -217,6 +217,29 @@ describe("applyVariant", () => {
 			}
 		}
 	});
+
+	test("handles CRLF line endings (Windows checkout default)", () => {
+		// On Windows runners, actions/checkout honors git's core.autocrlf
+		// and writes Cargo.toml with CRLF endings. The regexes must match.
+		const crlfCargo = FIXTURE_CARGO.replace(/\n/g, "\r\n");
+		const crlfBuildJs = FIXTURE_BUILD_JS.replace(/\n/g, "\r\n");
+		// Each cargo-touching variant should still find the section + key.
+		for (const v of ["opt-level-s-global", "opt-level-z-global", "lto-thin", "lto-off"] as const) {
+			const r = applyVariant(v, crlfCargo, crlfBuildJs);
+			assert.notEqual(r.cargoToml, crlfCargo, `${v} should mutate CRLF Cargo.toml`);
+			// CRLF endings preserved — output must still contain \r\n pairs.
+			assert.ok(r.cargoToml.includes("\r\n"), `${v} must preserve CRLF endings`);
+			// And must not introduce stray bare-LF lines that weren't there before.
+			const baseLfOnly = (crlfCargo.match(/(?<!\r)\n/g) ?? []).length;
+			const newLfOnly = (r.cargoToml.match(/(?<!\r)\n/g) ?? []).length;
+			assert.equal(newLfOnly, baseLfOnly, `${v} must not introduce bare LF lines`);
+		}
+		// The build.js variants drop a line; ensure they still locate it.
+		const noBuildStd = applyVariant("no-build-std", crlfCargo, crlfBuildJs);
+		assert.equal(noBuildStd.buildJs.includes("Zbuild-std"), false);
+		const noInfo = applyVariant("no-info-level", crlfCargo, crlfBuildJs);
+		assert.equal(noInfo.buildJs.includes('features.push("info-level")'), false);
+	});
 });
 
 // -- measure ----------------------------------------------------------------
