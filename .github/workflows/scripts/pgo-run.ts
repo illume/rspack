@@ -31,6 +31,7 @@ import {
 	readProfile,
 	runProfile,
 } from "./pgo-profile.ts";
+import { buildReport, renderMarkdown } from "./pgo-report.ts";
 
 function repoRoot(): string {
 	return env.REPO_ROOT ?? process.cwd();
@@ -62,13 +63,24 @@ function cmdProfile(rest: string[]): string {
 	return path;
 }
 
-function cmdApply(profileFile: string): { hot: number; cold: number } {
+interface ApplyOpts {
+	threshold?: number;
+	hotOptLevel?: string;
+	coldOptLevel?: string;
+}
+
+function cmdApply(profileFile: string, opts: ApplyOpts = {}): { hot: number; cold: number } {
 	step(`apply overrides from ${profileFile}`);
 	const profile = readProfile(profileFile);
-	const classification = classify(profile);
-	const { changed } = applyOverridesToFile(cargoTomlPath(), classification);
+	const classification = classify(profile, {
+		hotCumulativeShare: opts.threshold,
+	});
+	const { changed } = applyOverridesToFile(cargoTomlPath(), classification, {
+		hotOptLevel: opts.hotOptLevel,
+		coldOptLevel: opts.coldOptLevel,
+	});
 	console.log(
-		`  ${changed ? "updated" : "unchanged"}: ${classification.hot.length} hot crates, ${classification.cold.length} cold crates`
+		`  ${changed ? "updated" : "unchanged"}: ${classification.hot.length} hot crates @ opt-level=${opts.hotOptLevel ?? "3"}, ${classification.cold.length} cold crates @ opt-level=${opts.coldOptLevel ?? '"z"'} (threshold=${opts.threshold ?? 0.85})`
 	);
 	for (const c of classification.hot.slice(0, 10)) {
 		console.log(`    hot  ${c.crate.padEnd(40)} ${(c.pct * 100).toFixed(2)}%`);
@@ -131,16 +143,44 @@ function cmdValidate(): void {
 	}
 }
 
+function parseApplyOpts(rest: string[]): { profile: string | undefined; opts: ApplyOpts } {
+	const opts: ApplyOpts = {};
+	let profile: string | undefined;
+	for (let i = 0; i < rest.length; i++) {
+		const a = rest[i];
+		if (a === "--profile") profile = rest[++i];
+		else if (a === "--threshold") opts.threshold = Number(rest[++i]);
+		else if (a === "--hot-opt-level") opts.hotOptLevel = rest[++i];
+		else if (a === "--cold-opt-level") opts.coldOptLevel = rest[++i];
+	}
+	return { profile, opts };
+}
+
+function cmdReport(profileFile: string, opts: { threshold?: number; functionsPerCrate?: number; topGlobal?: number } = {}): void {
+	step(`report (function-level) from ${profileFile}`);
+	const profile = readProfile(profileFile);
+	const report = buildReport(profile, {
+		hotCumulativeShare: opts.threshold,
+		functionsPerCrate: opts.functionsPerCrate,
+		topGlobalFunctions: opts.topGlobal,
+	});
+	process.stdout.write(renderMarkdown(report, {
+		functionsPerCrate: opts.functionsPerCrate,
+		topGlobalFunctions: opts.topGlobal,
+	}));
+}
+
 function usage(): never {
 	console.error(
 		[
 			"Usage:",
 			"  pgo-run.ts profile  -- <bench-cmd> [args...]",
-			"  pgo-run.ts apply    [--profile <path>]",
+			"  pgo-run.ts apply    [--profile <path>] [--threshold <0..1>] [--hot-opt-level <lvl>] [--cold-opt-level <lvl>]",
 			"  pgo-run.ts revert",
 			"  pgo-run.ts rebuild",
 			"  pgo-run.ts validate",
-			"  pgo-run.ts all      -- <bench-cmd> [args...]",
+			"  pgo-run.ts report   [--profile <path>] [--threshold <0..1>] [--functions-per-crate <N>] [--top-global <N>]",
+			"  pgo-run.ts all      [--threshold <0..1>] [--hot-opt-level <lvl>] [--cold-opt-level <lvl>] -- <bench-cmd> [args...]",
 		].join("\n")
 	);
 	exit(2);
@@ -163,12 +203,9 @@ export async function main(args: string[]): Promise<void> {
 			return;
 		}
 		case "apply": {
-			const idx = rest.indexOf("--profile");
-			const path =
-				idx >= 0 && rest[idx + 1]
-					? rest[idx + 1]
-					: profilePath(repoRoot(), gitSha());
-			cmdApply(path);
+			const { profile, opts } = parseApplyOpts(rest);
+			const path = profile ?? profilePath(repoRoot(), gitSha());
+			cmdApply(path, opts);
 			return;
 		}
 		case "revert":
@@ -180,12 +217,28 @@ export async function main(args: string[]): Promise<void> {
 		case "validate":
 			cmdValidate();
 			return;
+		case "report": {
+			const reportOpts: { threshold?: number; functionsPerCrate?: number; topGlobal?: number } = {};
+			let profile: string | undefined;
+			for (let i = 0; i < rest.length; i++) {
+				const a = rest[i];
+				if (a === "--profile") profile = rest[++i];
+				else if (a === "--threshold") reportOpts.threshold = Number(rest[++i]);
+				else if (a === "--functions-per-crate") reportOpts.functionsPerCrate = Number(rest[++i]);
+				else if (a === "--top-global") reportOpts.topGlobal = Number(rest[++i]);
+			}
+			const path = profile ?? profilePath(repoRoot(), gitSha());
+			cmdReport(path, reportOpts);
+			return;
+		}
 		case "all": {
 			const cmdStart = rest.indexOf("--");
+			const flagsArgs = cmdStart === -1 ? [] : rest.slice(0, cmdStart);
 			const cmd = cmdStart === -1 ? rest : rest.slice(cmdStart + 1);
 			if (cmd.length === 0) usage();
+			const { opts } = parseApplyOpts(flagsArgs);
 			const path = cmdProfile(cmd);
-			cmdApply(path);
+			cmdApply(path, opts);
 			cmdRebuild();
 			cmdValidate();
 			return;

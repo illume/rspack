@@ -426,3 +426,98 @@ describe("applyOverridesToFile", () => {
 		assert.equal(r2.changed, false);
 	});
 });
+
+// -------- pgo-report (function-level) --------
+
+import { buildReport, renderMarkdown } from "./pgo-report.ts";
+
+function reportFixture(): PgoProfile {
+// Two clearly-hot crates and one cold one. swc_ecma_minifier dominates.
+return {
+schema_version: PROFILE_SCHEMA_VERSION,
+git_sha: "abc",
+created_at: "2026-01-01T00:00:00Z",
+rustc_version: null,
+command: "fixture",
+total_samples: 1000,
+by_crate: [
+{ crate: "swc_ecma_minifier", samples: 700, pct: 0.7 },
+{ crate: "swc_ecma_parser", samples: 200, pct: 0.2 },
+{ crate: "log", samples: 50, pct: 0.05 },
+{ crate: "<unknown>", samples: 50, pct: 0.05 },
+],
+top_symbols: [
+{ symbol: "<swc_ecma_minifier::Pure>::visit_mut_expr", crate: "swc_ecma_minifier", samples: 400 },
+{ symbol: "<swc_ecma_minifier::Optimizer>::visit_mut_expr", crate: "swc_ecma_minifier", samples: 200 },
+{ symbol: "<swc_ecma_minifier::Pure>::make_bool", crate: "swc_ecma_minifier", samples: 100 },
+{ symbol: "<swc_ecma_parser::Lexer>::next_token", crate: "swc_ecma_parser", samples: 150 },
+{ symbol: "<swc_ecma_parser::Lexer>::read_keyword", crate: "swc_ecma_parser", samples: 50 },
+{ symbol: "log::log", crate: "log", samples: 50 },
+{ symbol: "do_syscall_64", crate: null, samples: 50 },
+],
+};
+}
+
+describe("buildReport", () => {
+it("includes top functions for every hot crate", () => {
+const profile = reportFixture();
+const r = buildReport(profile, { hotCumulativeShare: 0.85 });
+const minifier = r.hotCrates.find(c => c.crate === "swc_ecma_minifier");
+assert.ok(minifier, "minifier should be hot");
+assert.equal(minifier!.functions.length, 3);
+// Within-crate share: 400/700 ≈ 0.5714
+assert.ok(
+Math.abs(minifier!.functions[0].cratePct - 400 / 700) < 1e-9,
+`expected cratePct ~${400 / 700}, got ${minifier!.functions[0].cratePct}`
+);
+// Whole-binding share: 400/1000 = 0.4
+assert.equal(minifier!.functions[0].pct, 0.4);
+});
+it("respects functionsPerCrate cap", () => {
+const r = buildReport(reportFixture(), { functionsPerCrate: 1 });
+const minifier = r.hotCrates.find(c => c.crate === "swc_ecma_minifier")!;
+assert.equal(minifier.functions.length, 1);
+assert.match(minifier.functions[0].symbol, /Pure>::visit_mut_expr/);
+});
+it("excludes <unknown>-attributed symbols from globalHotFunctions", () => {
+const r = buildReport(reportFixture());
+assert.ok(r.globalHotFunctions.every(f => f.crate !== null));
+// And kernel/libc symbol is gone
+assert.ok(!r.globalHotFunctions.some(f => f.symbol === "do_syscall_64"));
+});
+it("computes monotonically nondecreasing cumPct for global functions", () => {
+const r = buildReport(reportFixture());
+let prev = 0;
+for (const f of r.globalHotFunctions) {
+assert.ok(f.cumPct >= prev - 1e-12, `cumPct went down: ${prev} -> ${f.cumPct}`);
+assert.ok(f.cumPct <= 1 + 1e-12, `cumPct > 1: ${f.cumPct}`);
+prev = f.cumPct;
+}
+});
+});
+
+describe("renderMarkdown", () => {
+it("renders the hot-crate sections and the loop-inspection recipe", () => {
+const md = renderMarkdown(buildReport(reportFixture()));
+assert.match(md, /Top hot functions across the whole binding/);
+assert.match(md, /Hot functions inside each hot crate/);
+assert.match(md, /### `swc_ecma_minifier`/);
+assert.match(md, /perf annotate/);
+assert.match(md, /perf report/);
+});
+it("trims long symbol names to the requested width", () => {
+const wide = "a".repeat(500);
+const profile: PgoProfile = {
+...reportFixture(),
+top_symbols: [
+{ symbol: `swc_ecma_minifier::${wide}`, crate: "swc_ecma_minifier", samples: 700 },
+],
+};
+const md = renderMarkdown(buildReport(profile), { symbolWidth: 50 });
+// The truncation marker should appear and no row should be 500+ chars long.
+assert.match(md, /…/);
+for (const line of md.split("\n")) {
+assert.ok(line.length < 400, `line too long: ${line.length}`);
+}
+});
+});

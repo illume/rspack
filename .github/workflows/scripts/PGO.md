@@ -18,6 +18,7 @@ samples instead of guesswork.
 | `pgo-profile.ts` | Run `perf record` + `perf script`, parse, attribute samples to crates, write `perf_profiles/<sha>.json` |
 | `pgo-classify.ts` | Read a profile, classify each crate as `hot` (top of cumulative-share threshold) or `cold` |
 | `pgo-apply-overrides.ts` | Write a managed `[profile.release.package.<crate>]` block into the workspace `Cargo.toml` |
+| `pgo-report.ts` | Render the **function-level** view of a stored profile: hot functions inside each hot crate, plus a global top-N hot-functions table with cumulative share |
 | `pgo-run.ts` | Driver that orchestrates the full loop |
 | `pgo.test.ts` | Unit tests (run with `node --experimental-strip-types --test`) |
 
@@ -153,6 +154,56 @@ extracted. Anything that doesn't match `[a-zA-Z_][a-zA-Z0-9_]*` (kernel
 symbols, libc, anonymous vtable entries) is bucketed under `<unknown>`
 and excluded from classification.
 
+## Going deeper: function- and loop-level inspection
+
+The crate-level classifier (`pgo-classify.ts`) decides per-crate
+`opt-level` overrides — that's the loop the build pipeline drives. But
+the same `perf_profiles/<sha>.json` carries the top-100 leaf symbols
+(with attributed crate and sample count), so once you know *which*
+crates are hot you can drill in to *which functions inside them* are
+hot.
+
+`pgo-report.ts` is the function-level companion. It takes a stored
+profile and renders a Markdown report with:
+
+- **Top hot functions across the whole binding** — ranked, with
+  cumulative share. Answers "where would 1 hour of human optimization
+  effort have the biggest impact?"
+- **Hot functions inside each hot crate** — for every crate the
+  classifier marked hot, its top functions in this profile, with both
+  whole-binding share and within-crate share. Answers "we know
+  `swc_ecma_minifier` is hot — *which* visitor is the expensive one?"
+- A **per-function loop / instruction recipe** using `perf annotate`
+  against the same `perf.data` the profile JSON came from.
+
+```bash
+# Render the function-level report from the committed profile:
+node --experimental-strip-types \
+  .github/workflows/scripts/pgo-run.ts report \
+  --profile perf_profiles/<sha>.json \
+  --top-global 25 --functions-per-crate 8
+
+# Drop into per-instruction (and per-loop) view of one function:
+perf annotate -i perf_profiles/<sha>.perf.data --stdio --source \
+  swc_ecma_minifier::compress::pure::Pure
+
+# Hot loops across the whole binding (sym + source-line aggregation):
+perf report -i perf_profiles/<sha>.perf.data \
+  --stdio --no-children -s sym,srcline | head -50
+```
+
+Loops typically show up in `perf annotate` as the basic block(s) with
+the highest per-instruction sample density inside one of the hot
+functions above. There is no nightly-stable Rust mechanism to apply
+per-function `opt-level` from `Cargo.toml` (that's an attribute on the
+function itself: nightly `#[optimize(speed)]` / `#[optimize(size)]`),
+so the action this report suggests is one of:
+
+1. Tighten the *crate* threshold so the surrounding crate gets `=3`.
+2. Annotate the specific hot function with `#[inline]` /
+   `#[inline(always)]` / `#[cold]` in source.
+3. Restructure the hot loop in source (the usual response).
+
 ## Validation
 
 `pgo-run.ts validate` is intentionally minimal: it just checks that the
@@ -228,16 +279,31 @@ profile: `lto="fat"`, `codegen-units=1`, `strip=true`, `panic="abort"`,
 | Variant | Bytes | MiB | % of baseline | Δ |
 | --- | ---: | ---: | ---: | ---: |
 | baseline (workspace `opt-level = 3`, no managed block) | 58,397,088 | 55.69 | 100.00% | — |
-| **PGO-applied** (11 hot, 84 cold at `opt-level = "z"`) | **49,782,056** | **47.48** | **85.25%** | **−8,615,032 B (−8.21 MiB, −14.75%)** |
+| **PGO-applied, `--threshold 0.85`** (11 hot, 84 cold at `"z"`) | 49,782,056 | 47.48 | 85.25% | −8,615,032 B (−8.21 MiB, −14.75%) |
+| **PGO-applied, `--threshold 0.95`** (18 hot, 77 cold at `"z"`) ⭐ | **47,191,592** | **45.01** | **80.81%** | **−11,205,496 B (−10.69 MiB, −19.19%)** |
 | `opt-level = "s"` global (no PGO, every dep) | 37,681,064 | 35.94 | 64.53% | −20,716,024 B (−35.47%) |
 | `opt-level = "z"` global (no PGO, every dep) | 31,086,120 | 29.65 | 53.23% | −27,310,968 B (−46.77%) |
 
-**Read:** PGO recovers ~31% of the size savings of "global `opt-level = "z"`"
-(−14.75% vs −46.77%) while keeping the SWC hot path at full `opt-level = 3`
-codegen. The remaining ~32 MB gap to the global-`z` build is the size
-contribution of the 11 hot crates we deliberately did *not* shrink, plus
-the parts of `<unknown>` (kernel/libc/JIT, ~19% of samples) that aren't
-attributable to a Rust crate at all.
+**Read:** at `--threshold 0.95` the PGO loop **simultaneously preserves
+more hot crates *and* produces a smaller binary** than at `0.85`
+(47.19 MiB vs 47.48 MiB, with 18 hot vs 11 hot). The seven additional
+hot crates at the wider threshold —
+`swc_ecma_codegen`, `hstr`, `swc_common`, `indexmap`, `swc_ecma_transformer`,
+`swc_ecma_transforms_typescript`, `alloc` — would have been compiled at
+`opt-level = "z"` at `0.85` and were probably preventing some
+fat-LTO inlining at the boundary; promoting them to `=3` lets LTO merge
+the call sites and dedupe code, which on this workload is a net
+size *win*. The headline PGO result we report is the `--threshold 0.95`
+build: **47,191,592 bytes, −19.19% vs baseline**, while keeping
+~92% of attributable CPU on `opt-level = 3` codegen.
+
+`--threshold 0.85` recovers ~31% of the size savings of "global `"z"`"
+(−14.75% vs −46.77%); `--threshold 0.95` recovers ~41% (−19.19% vs
+−46.77%) while preserving more hot paths. The remaining gap to the
+global-`z` build is the size contribution of the hot crates we
+deliberately did *not* shrink, plus the parts of `<unknown>`
+(kernel/libc/JIT, ~19% of samples) that aren't attributable to a Rust
+crate at all.
 
 The trade-off:
 
@@ -261,7 +327,7 @@ RUSTFLAGS="-Cforce-unwind-tables=no" cargo +nightly-2026-04-16 build \
 stat -c '%s' target/x86_64-unknown-linux-gnu/release/librspack_node.so
 # → 58,397,088
 
-# pgo-applied
+# pgo-applied (--threshold 0.85, 11 hot)
 node --experimental-strip-types .github/workflows/scripts/pgo-run.ts apply \
     --profile perf_profiles/bb4b6f7e2acf423926145b94eb1bea19801ee4c9.json
 RUSTFLAGS="-Cforce-unwind-tables=no" cargo +nightly-2026-04-16 build \
@@ -271,6 +337,14 @@ RUSTFLAGS="-Cforce-unwind-tables=no" cargo +nightly-2026-04-16 build \
     --no-default-features --features plugin,info-level
 stat -c '%s' target/x86_64-unknown-linux-gnu/release/librspack_node.so
 # → 49,782,056
+
+# pgo-applied (--threshold 0.95, 18 hot — recommended)
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts apply \
+    --profile perf_profiles/bb4b6f7e2acf423926145b94eb1bea19801ee4c9.json \
+    --threshold 0.95
+pnpm run build:binding:release
+stat -c '%s' crates/node_binding/rspack.linux-x64-gnu.node
+# → 47,191,592
 node --experimental-strip-types .github/workflows/scripts/pgo-run.ts revert
 ```
 
