@@ -76,6 +76,41 @@ entries cite documentation and known issues.
 | `eu-strip --reloc-debug-sections` | ✅ Loads | elfutils variant of strip. No additional benefit beyond `strip=true`. |
 | `Zstandard` filesystem compression (btrfs/zstd) | ✅ Loads (transparent) | Not a packaging-layer tool — only helps disk usage on the user's machine. Doesn't shrink the npm tarball or the on-disk file `du -b` size. |
 
+#### Empirical UPX run on the actually-shipped `rspack.linux-x64-gnu.node`
+
+Source: `npm pack @rspack/binding-linux-x64-gnu@2.0.1` (the artifact users actually
+download), then `chmod +x` (UPX requires the executable bit) and pack with each
+`upx` level. Run on `Linux x86_64`, UPX 4.2.2.
+
+| Variant | Bytes | % of baseline | Δ vs baseline | Pack wall-time |
+| --- | ---: | ---: | ---: | ---: |
+| **baseline (shipped, already `strip=true` + LTO fat)** | **51,166,344** | 100.00% | — | — |
+| `upx -1` (fastest)         | 24,998,764 | 48.86% | −26,167,580 (−51.14%) | ~2 s |
+| `upx -9`                   | 20,267,884 | 39.61% | −30,898,460 (−60.39%) | ~25 s |
+| `upx --best`               | 19,161,964 | 37.45% | −32,004,380 (−62.55%) | ~14 min |
+| `upx --best --lzma` ⭐ best | **15,537,004** | **30.37%** | **−35,629,340 (−69.63%)** | ~30 s |
+
+Headline: the best realistic UPX setting (`--best --lzma`) takes the on-disk
+binding from **~48.8 MiB → ~14.8 MiB**, a **−69.6%** reduction (35.6 MB saved).
+The `.tgz` users actually download will compress less than that delta (UPX
+output is already high-entropy, so npm's gzip layer adds little on top — the
+saving on the packed tarball is closer to the on-disk delta than to the gzip
+ratio of the original).
+
+This is the realistic ceiling for "compress the shipped Linux artifact" on a
+release build that already has `strip=true`, `lto="fat"`, `codegen-units=1`,
+`panic="abort"`, `-Zbuild-std`, `-Cforce-unwind-tables=no`, and ~38 deps at
+`opt-level="s"` applied. The compiler/linker knobs cannot reach that
+compression ratio — it comes from LZMA-compressing the entire `.text` and
+`.rodata`, not from generating less code.
+
+The recommendation in the [Recommendation](#recommendation) section below is
+still **"do not ship UPX-packed bindings"**, but for the operational reasons
+documented there (demand-paging, first-load latency, AV-flagging risk, broken
+`addr2line`/`perf` symbolication for crash reports), not because the size
+savings are unattractive. They aren't — they're the largest single lever
+available on Linux.
+
 ### macOS arm64 / x86_64 (`*.darwin-*.node`, Mach-O `MH_BUNDLE`)
 
 | Tool | Result | Notes |
@@ -127,7 +162,7 @@ would recommend here. Stick to compiler/linker knobs.
 | Direction | Recommendation |
 | --- | --- |
 | **Compiler/linker knobs** | ✅ Pursue. The experiment workflow gives real numbers per-platform. The PR's Cargo.toml change (extending `opt-level="s"` to three more diagnostic crates) is a small additive win in this category. |
-| **Linux UPX**            | ⚠️ Possible but not recommended. ~30–40% on-disk savings traded for first-load latency, AV-flagging risk, lost shared-page memory savings, and broken stack symbolication. |
+| **Linux UPX**            | ⚠️ Possible but not recommended. **Empirically ~70% on-disk reduction (51.2 MB → 15.5 MB with `upx --best --lzma`)** traded for first-load latency, AV-flagging risk, lost shared-page memory savings, and broken stack symbolication. |
 | **macOS compressors**    | ❌ Don't pursue. Notarization is the binding constraint. |
 | **Windows compressors**  | ❌ Don't pursue. AV-flagging makes UPX-packed DLLs unsafe to ship via `npm install`. |
 | **Tarball-layer tricks** | ✅ Already done by npm (gzip). zstd-compressed npm tarballs are a registry-side concern, not ours. |
