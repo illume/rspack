@@ -392,20 +392,22 @@ export function applyPlanToVendoredCrate(
 	const files: Array<{ path: string; changes: number }> = [];
 	let total = 0;
 	for (const file of list(crateDir)) {
-		let src = read(file);
+		const original = read(file);
+		let src = original;
 		const rel = relative(crateDir, file);
 		// Lib root: ensure crate-level header. Common locations.
 		const isLibRoot = rel === "src/lib.rs" || rel === join("src", "lib.rs");
+		let headerChange = 0;
 		if (isLibRoot) {
 			const withHeader = ensureLibHeader(src, planCrate.defaultDecision);
 			if (withHeader !== src) {
 				src = withHeader;
+				headerChange = 1;
 			}
 		}
 		const { content, changed } = rewriteSource(src, hot, cold);
-		const headerChange = isLibRoot && content !== src && changed === 0 ? 1 : 0;
 		const writeChanges = changed + headerChange;
-		if (content !== src || isLibRoot) {
+		if (content !== original) {
 			write(file, content);
 		}
 		if (writeChanges > 0) files.push({ path: file, changes: writeChanges });

@@ -1085,7 +1085,26 @@ assert.match(writes["/v/swc/src/lib.rs"], /#!\[feature\(optimize_attribute\)\]/)
 // visit.rs gets both annotations.
 assert.match(writes["/v/swc/src/visit.rs"], /#\[optimize\(speed\)\][^\n]*\n\s*pub fn visit_mut_expr/);
 assert.match(writes["/v/swc/src/visit.rs"], /#\[optimize\(size\)\][^\n]*\n\s*fn helper/);
-// skip.rs has no matching name; content should be unchanged.
-assert.equal(writes["/v/swc/src/skip.rs"] ?? files["/v/swc/src/skip.rs"], files["/v/swc/src/skip.rs"]);
+// skip.rs has no matching name; content should be unchanged AND not written.
+assert.equal(writes["/v/swc/src/skip.rs"], undefined);
+});
+it("does not rewrite an already-patched lib.rs (idempotent, no spurious writes)", () => {
+const seeded = ensureLibHeader("//! crate\n", "cold");
+const files: Record<string, string> = { "/v/swc/src/lib.rs": seeded };
+const writes: Record<string, string> = {};
+const planCrate: PatchPlanCrate = {
+crate: "swc",
+patchPath: "vendor/swc",
+defaultDecision: "cold",
+hot: [],
+cold: [],
+};
+const result = applyPlanToVendoredCrate("/v/swc", planCrate, {
+readFile: p => files[p],
+writeFile: (p, c) => { writes[p] = c; },
+listFiles: () => Object.keys(files),
+});
+assert.equal(result.totalChanges, 0);
+assert.equal(writes["/v/swc/src/lib.rs"], undefined);
 });
 });
