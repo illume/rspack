@@ -13,6 +13,7 @@ import {
 	BEGIN_MARKER,
 	END_MARKER,
 	applyOverridesToFile,
+	existingPackageOverrides,
 	readWorkspaceReleaseOptLevel,
 	removeManagedBlock,
 	renderManagedBlock,
@@ -59,6 +60,17 @@ describe("crateFromSymbol", () => {
 		assert.equal(crateFromSymbol("[kernel.kallsyms]"), null);
 		assert.equal(crateFromSymbol(""), null);
 		assert.equal(crateFromSymbol("123_not_an_ident"), null);
+	});
+	it("rejects bare C/kernel/libc symbols (no `::`)", () => {
+		// These look like valid identifiers but have no `::`, so they
+		// cannot be Rust demangled symbols. Treat as unattributable so
+		// we don't emit nonsense [profile.release.package.X] overrides.
+		assert.equal(crateFromSymbol("__schedule"), null);
+		assert.equal(crateFromSymbol("do_syscall_64"), null);
+		assert.equal(crateFromSymbol("_mi_page_malloc_zero"), null);
+		assert.equal(crateFromSymbol("clear_page_erms"), null);
+		assert.equal(crateFromSymbol("v8"), null);
+		assert.equal(crateFromSymbol("node"), null);
 	});
 	it("handles bracketed-but-no-`as` symbols by stripping the leading `<`", () => {
 		assert.equal(crateFromSymbol("<rspack_core::Foo>::bar"), "rspack_core");
@@ -303,6 +315,46 @@ describe("renderManagedBlock", () => {
 	it("renders an explicit empty marker when nothing differs from default", () => {
 		const block = renderManagedBlock({ hot: [], cold: [] }, MINI_CARGO);
 		assert.match(block, /no overrides needed/);
+	});
+	it("skips crates that already have a hand-written [profile.release.package.X] override", () => {
+		// MINI_CARGO already pins `regex-syntax`. Re-emitting it from the
+		// managed block would produce a TOML duplicate-key error and break
+		// `cargo metadata`. The renderer must skip it.
+		const block = renderManagedBlock(
+			{
+				hot: [],
+				cold: [
+					{ crate: "regex-syntax", decision: "cold", samples: 1, pct: 0.01, reason: "r" },
+					{ crate: "owo_colors", decision: "cold", samples: 1, pct: 0.01, reason: "r" },
+				],
+			},
+			MINI_CARGO
+		);
+		assert.equal(
+			/\[profile\.release\.package\.regex-syntax\]/.test(
+				block.replace(/^# .*$/gm, "")
+			),
+			false,
+			"existing override must not be re-emitted"
+		);
+		assert.match(block, /\[profile\.release\.package\.owo_colors\]/);
+		assert.match(block, /Skipped 1 crate/);
+	});
+});
+
+describe("existingPackageOverrides", () => {
+	it("collects bare and quoted override keys, ignoring the managed block", () => {
+		const cargo =
+			MINI_CARGO +
+			"\n" +
+			BEGIN_MARKER +
+			"\n[profile.release.package.from_managed]\nopt-level = \"z\"\n" +
+			END_MARKER +
+			"\n[profile.release.package.\"crate-with-dash\"]\nopt-level = \"s\"\n";
+		const set = existingPackageOverrides(cargo);
+		assert.equal(set.has("regex-syntax"), true);
+		assert.equal(set.has("crate-with-dash"), true);
+		assert.equal(set.has("from_managed"), false, "managed block must be ignored");
 	});
 });
 

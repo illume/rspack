@@ -48,6 +48,25 @@ export function readWorkspaceReleaseOptLevel(cargoToml: string): string {
 	return km[1] ?? km[2] ?? km[3];
 }
 
+/**
+ * Find every `[profile.release.package.<crate>]` section already present in
+ * the file *outside* the managed block. We must not emit duplicate keys
+ * for these — TOML rejects duplicate tables and `cargo metadata` errors.
+ *
+ * Quoted forms `[profile.release.package."crate-with-dash"]` are handled.
+ */
+export function existingPackageOverrides(cargoToml: string): Set<string> {
+	const withoutManaged = cargoToml.replace(BLOCK_RE, "\n");
+	const out = new Set<string>();
+	const re = /^\[profile\.release\.package\.(?:"([^"]+)"|([A-Za-z0-9_-]+))\]/gm;
+	let m: RegExpExecArray | null;
+	while ((m = re.exec(withoutManaged)) !== null) {
+		out.add(m[1] ?? m[2]);
+	}
+	return out;
+}
+
+
 export interface RenderOptions {
 	workspaceDefault?: string; // override the auto-detected workspace opt-level
 	hotOptLevel?: string; // default "3"
@@ -67,6 +86,7 @@ export function renderManagedBlock(
 	const wsDefault = opts.workspaceDefault ?? readWorkspaceReleaseOptLevel(cargoToml);
 	const hotLevel = opts.hotOptLevel ?? "3";
 	const coldLevel = opts.coldOptLevel ?? '"z"';
+	const existing = existingPackageOverrides(cargoToml);
 
 	const lines: string[] = [];
 	lines.push(BEGIN_MARKER);
@@ -75,8 +95,13 @@ export function renderManagedBlock(
 	lines.push(`# Workspace [profile.release].opt-level detected as ${wsDefault}.`);
 
 	let emittedAny = false;
+	let skippedExisting = 0;
 	const hotsToEmit = wsDefault === hotLevel ? [] : classification.hot;
 	for (const c of hotsToEmit) {
+		if (existing.has(c.crate)) {
+			skippedExisting++;
+			continue;
+		}
 		lines.push("");
 		lines.push(`[profile.release.package.${c.crate}]`);
 		lines.push(`opt-level = ${formatLevel(hotLevel)}  # hot: ${(c.pct * 100).toFixed(2)}% (${c.reason})`);
@@ -84,11 +109,22 @@ export function renderManagedBlock(
 	}
 	const coldsToEmit = wsDefault === stripQuotes(coldLevel) ? [] : classification.cold;
 	for (const c of coldsToEmit) {
+		if (existing.has(c.crate)) {
+			skippedExisting++;
+			continue;
+		}
 		lines.push("");
 		lines.push(`[profile.release.package.${c.crate}]`);
 		const pct = c.pct > 0 ? `${(c.pct * 100).toFixed(2)}%` : "unsampled";
 		lines.push(`opt-level = ${coldLevel}  # cold: ${pct} (${c.reason})`);
 		emittedAny = true;
+	}
+	if (skippedExisting > 0) {
+		lines.splice(
+			4,
+			0,
+			`# Skipped ${skippedExisting} crate(s) with hand-written [profile.release.package.*] overrides.`
+		);
 	}
 	if (!emittedAny) {
 		lines.push("# (no overrides needed — workspace default already matches)");

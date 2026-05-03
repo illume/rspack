@@ -74,6 +74,12 @@ export function crateFromSymbol(sym: string): string | null {
 			s = s.slice(1);
 		}
 	}
+	// A demangled Rust symbol always contains `::` separating the crate
+	// from the rest of the path. Bare C/kernel/libc symbols (e.g.
+	// `do_syscall_64`, `__schedule`, `_mi_page_malloc_zero`) have no `::`
+	// and must be rejected — otherwise we'd emit nonsensical
+	// [profile.release.package.<symbol>] overrides for non-crates.
+	if (!s.includes("::")) return null;
 	const head = s.split("::")[0];
 	// A crate name is `[a-zA-Z_][a-zA-Z0-9_]*`. Reject anything else.
 	if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(head)) return null;
