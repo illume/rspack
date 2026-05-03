@@ -66,6 +66,49 @@ export interface BenchDiff {
 }
 
 /**
+ * Parse the human-readable vitest bench table from stdout. Format
+ * (vitest 3.x bench reporter):
+ *
+ *   ✓ ts-react.bench.ts > <suite> 5837ms
+ *       name                                              hz     min      max    mean    ...
+ *     · js@<bench name>                          7,023.11   0.1177  1.8537  0.1424   ...   ±0.95%     3512
+ *
+ * The name line is prefixed with "·"; the columns after it are
+ * `hz min max mean p75 p99 p995 p999 rme samples`. We extract
+ * mean (ms), hz, and samples (rme is not stable across vitest minors,
+ * so stdDevMs is left as NaN when only the table is available).
+ */
+export function parseVitestBenchStdout(stdout: string): BenchSample[] {
+	const out: BenchSample[] = [];
+	// Strip ANSI escape sequences — vitest's bench reporter colorizes
+	// the table by default, and CodSpeed-wrapped runs don't expose a
+	// no-color toggle from the command-line we drive.
+	// eslint-disable-next-line no-control-regex
+	const stripAnsi = (s: string): string => s.replace(/\x1B\[[0-9;]*[A-Za-z]/g, "");
+	const lines = stripAnsi(stdout).split(/\r?\n/);
+	const bulletRe = /^\s*·\s+(.+?)\s{2,}([\d,.]+)\s+([\d,.]+)\s+([\d,.]+)\s+([\d,.]+)\s+([\d,.]+)\s+([\d,.]+)\s+([\d,.]+)\s+([\d,.]+)\s+±?[\d,.]+%\s+([\d,]+)\s*$/;
+	for (const line of lines) {
+		const m = bulletRe.exec(line);
+		if (!m) continue;
+		const name = m[1].trim();
+		const hz = Number(m[2].replace(/,/g, ""));
+		const meanMs = Number(m[5].replace(/,/g, ""));
+		const samples = Number(m[10].replace(/,/g, ""));
+		if (!Number.isFinite(hz) || !Number.isFinite(meanMs)) continue;
+		out.push({
+			name,
+			meanMs,
+			hz,
+			stdDevMs: NaN,
+			samples: Number.isFinite(samples) ? samples : 0,
+		});
+	}
+	return out;
+}
+
+
+
+/**
  * Parse a vitest --reporter=json file into a flat list of BenchSample.
  *
  * vitest's bench JSON shape (as of vitest 3.x): top-level object with a
@@ -249,6 +292,10 @@ export function runBenchAndCollect(opts: RunBenchOpts): BenchResult {
 		opts.tmpJsonPath ??
 		join(opts.repoRoot, "perf_profiles", `_bench-tmp-${Date.now()}.json`);
 	mkdirSync(dirname(tmp), { recursive: true });
+	// We capture stdout to fall back to parsing the human-readable
+	// table (vitest's bench mode in 3.x doesn't reliably honor
+	// `--outputFile=` when the reporter is plugin-overridden, e.g.
+	// codspeed). The JSON file is the preferred path when present.
 	const args = [
 		"--filter",
 		"bench",
@@ -261,16 +308,40 @@ export function runBenchAndCollect(opts: RunBenchOpts): BenchResult {
 	];
 	const r = spawnSync("pnpm", args, {
 		cwd: opts.repoRoot,
-		stdio: "inherit",
 		env: process.env,
+		encoding: "utf8",
+		maxBuffer: 64 * 1024 * 1024,
 	});
+	if (r.stdout) process.stdout.write(r.stdout);
+	if (r.stderr) process.stderr.write(r.stderr);
 	if (r.status !== 0) {
 		throw new Error(`vitest bench exited ${r.status}`);
 	}
-	if (!existsSync(tmp)) {
-		throw new Error(`vitest --outputFile=${tmp} produced no file`);
+	let samples: BenchSample[] = [];
+	if (existsSync(tmp)) {
+		try {
+			samples = parseVitestBenchJson(readFileSync(tmp, "utf8"));
+		} catch {
+			samples = [];
+		}
 	}
-	const samples = parseVitestBenchJson(readFileSync(tmp, "utf8"));
+	if (samples.length === 0) {
+		samples = parseVitestBenchStdout(r.stdout ?? "");
+	}
+	if (samples.length === 0) {
+		// Persist the captured stdout for postmortem debugging when neither
+		// path produced samples — easier than re-running the 5–10 min bench.
+		try {
+			const dump = join(opts.repoRoot, "perf_profiles", `_bench-stdout-${Date.now()}.txt`);
+			writeFileSync(dump, r.stdout ?? "");
+			console.error(`[pgo-bench] dumped raw stdout to ${dump}`);
+		} catch {
+			/* best-effort */
+		}
+		throw new Error(
+			`no bench samples could be parsed from --outputFile=${tmp} or stdout`
+		);
+	}
 	const result: BenchResult = {
 		schemaVersion: BENCH_SCHEMA_VERSION,
 		gitSha: opts.gitSha,

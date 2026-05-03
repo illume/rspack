@@ -666,11 +666,48 @@ import {
 BENCH_SCHEMA_VERSION,
 compareBenches,
 parseVitestBenchJson,
+parseVitestBenchStdout,
 readBenchResult,
 renderBenchDiffMarkdown,
 writeBenchResult,
 type BenchResult,
 } from "./pgo-bench.ts";
+
+describe("pgo-bench: parseVitestBenchStdout", () => {
+it("extracts mean(ms), hz, samples from the human-readable bench table", () => {
+const stdout = [
+" ✓ ts-react.bench.ts > TypeScript React project 5837ms",
+"     name                                              hz     min      max    mean     p75     p99     p995     p999      rme  samples",
+"   · js@Traverse module graph by dependencies    7,023.11  0.1177   1.8537  0.1424  0.1412  0.2549   0.2631   0.2884   ±0.95%     3512",
+"   · js@stats.toJson()                             225.36  3.6120  10.6489  4.4374  4.8380  7.5333  10.6489  10.6489   ±4.64%      113",
+].join("\n");
+const samples = parseVitestBenchStdout(stdout);
+assert.equal(samples.length, 2);
+const a = samples[0];
+assert.equal(a.name, "js@Traverse module graph by dependencies");
+assert.ok(Math.abs(a.hz - 7023.11) < 1e-6);
+assert.ok(Math.abs(a.meanMs - 0.1424) < 1e-9);
+assert.equal(a.samples, 3512);
+const b = samples[1];
+assert.equal(b.name, "js@stats.toJson()");
+assert.ok(Math.abs(b.meanMs - 4.4374) < 1e-9);
+assert.equal(b.samples, 113);
+});
+
+it("returns empty array on non-bench stdout", () => {
+assert.deepEqual(parseVitestBenchStdout("hello\nworld\n"), []);
+assert.deepEqual(parseVitestBenchStdout(""), []);
+});
+
+it("strips ANSI color codes from vitest reporter output", () => {
+const ansi = "   \u001b[32m·\u001b[39m js@bench    \u001b[34m  7,011.50\u001b[39m  \u001b[36m0.1171\u001b[39m  \u001b[36m 2.0555\u001b[39m  \u001b[36m0.1426\u001b[39m  \u001b[36m0.1419\u001b[39m  \u001b[36m0.2630\u001b[39m  \u001b[36m0.2719\u001b[39m  \u001b[36m0.3423\u001b[39m  \u001b[33m±1.04%\u001b[39m     3506";
+const samples = parseVitestBenchStdout(ansi);
+assert.equal(samples.length, 1);
+assert.equal(samples[0].name, "js@bench");
+assert.ok(Math.abs(samples[0].meanMs - 0.1426) < 1e-9);
+assert.equal(samples[0].samples, 3506);
+});
+});
 
 describe("pgo-bench: parseVitestBenchJson", () => {
 it("parses vitest 3.x BenchTaskResult shape with nested tasks", () => {

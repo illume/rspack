@@ -608,3 +608,70 @@ turns those on, **stay on the same nightly the binding already uses**
 to avoid mixing rlibs across toolchains. The bench wrapper itself
 makes no toolchain assumption: it just runs whatever binding is in
 `crates/node_binding/`.
+
+### Empirical runtime bench: baseline vs aggressive-size
+
+Real numbers from `pnpm run build:binding:release` on this branch
+(toolchain `nightly-2026-04-16`, x86_64-unknown-linux-gnu, full
+production release profile incl. fat-LTO + `-Zbuild-std`), vitest
+3.2.4 benchmarks from `tests/bench/ts-react.bench.ts`. The
+`aggressive-z-95` build was produced by:
+
+```bash
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts \
+    apply --aggressive-size --threshold 0.95 \
+    --profile perf_profiles/bb4b6f7e2acf423926145b94eb1bea19801ee4c9.json
+pnpm run build:binding:release
+```
+
+i.e. workspace `[profile.release].opt-level = "z"` with 18 hot crates
+(incl. third-party `swc_ecma_*`, `hashbrown`, `hstr`, `swc_common`,
+`indexmap`, `regex_automata`, `alloc`) overridden back up to `=3`.
+The Cargo.toml managed block is then `revert`-ed in the PR — the
+committed bench JSONs reproduce these numbers when the same `apply`
+is re-run.
+
+**Binary size** (the shipped `rspack.linux-x64-gnu.node`):
+
+| Variant | Bytes | MiB | Δ vs baseline |
+| --- | ---: | ---: | ---: |
+| baseline (workspace `opt-level = 3`) | 53,007,144 | 50.55 | — |
+| **aggressive-z-95** | **39,943,592** | **38.09** | **−13,063,552 B (−24.65%)** |
+
+Build time: baseline 16m 15s, aggressive-z-95 13m 14s (faster, same
+mechanism as the global-`s`/`z` measurements: opt-for-size skips the
+expensive vectorization passes).
+
+**Runtime** (`tests/bench/ts-react.bench.ts`, 9 vitest benchmarks
+exercising the JS API surface against the React fixture; mean ms per
+iter, lower is faster):
+
+| Benchmark | Baseline mean (ms) | aggressive-z-95 mean (ms) | Δ |
+| --- | ---: | ---: | ---: |
+| js@Traverse module graph by dependencies | 0.145 | 0.141 | **−3.23%** |
+| js@Traverse module graph by connections | 0.026 | 0.029 | +8.33% |
+| js@Traverse compilation.modules | 0.004 | 0.004 | +5.56% |
+| js@stats.toJson() | 4.386 | 4.490 | +2.37% |
+| js@collect imported identifiers | 0.016 | 0.018 | +17.09% |
+| js@record module | 0.083 | 0.083 | −0.84% |
+| js@is css mod | 0.005 | 0.005 | +0.00% |
+| js@record chunk group | 0.003 | 0.003 | +10.71% |
+| js@external getResolve | 0.209 | 0.227 | +8.36% |
+
+**Overall: median Δ = +5.56%, mean Δ = +5.37%** (positive = candidate
+slower; negative = candidate faster). vitest's per-iter `rme`
+(relative margin of error) on these runs is mostly 0.3%–2%, with
+`external getResolve` showing 7%–13% variance — most of the
+single-bench Δs above are above the within-run noise floor, but
+`record module`, `is css mod`, and `Traverse compilation.modules` are
+inside it.
+
+**Read:** the aggressive-z-95 variant trades **~5.5% runtime** for
+**−24.65% binary size** (−12.5 MiB) on this workload, *with the SWC
+hot path preserved at `opt-level = 3`*. The 17% regression on
+`collect imported identifiers` is the largest single-bench cost and
+likely points to a cold-tail crate the 0.95 classifier didn't
+promote — re-running `pgo-profile.ts` against the bench harness
+itself (instead of the legacy committed profile) would shorten that
+gap. The size win is real and the throughput cost is small; whether
+to ship is a product judgment, not a measurement question.
