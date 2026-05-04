@@ -1215,6 +1215,10 @@ const original = [
 "",
 ].join("\n");
 const after = rewriteSource(original, new Set(["hot"]), new Set(["cold"]));
+// Sanity: rewriteSource actually injected markers we'll later strip.
+assert.equal(after.changed, 2);
+assert.match(after.content, /#\[optimize\(speed\)\][^\n]*pgo-managed/);
+assert.match(after.content, /#\[optimize\(size\)\][^\n]*pgo-managed/);
 const reverted = revertSourceMarkers(after.content);
 assert.equal(reverted.content, original);
 });

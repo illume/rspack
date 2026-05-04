@@ -422,10 +422,8 @@ export function revertSourceMarkers(src: string): { content: string; changed: nu
 		}
 		out.push(line, term);
 	}
-	// trim trailing pair if odd length
-	while (out.length > 0 && out[out.length - 1] === "" && out[out.length - 2] === "") {
-		out.pop();
-	}
+	// `out.join("")` collapses trailing empty entries naturally; no trim
+	// needed because join concatenates "" entries to nothing.
 	return { content: out.join(""), changed };
 }
 
