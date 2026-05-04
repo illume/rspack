@@ -52,6 +52,7 @@ import {
 	removePatchSection,
 	renderCargoPatchSection,
 	renderPlanMarkdown,
+	revertWorkspaceCrate,
 	writePatchSection,
 } from "./pgo-patch.ts";
 
@@ -305,9 +306,12 @@ function cmdPatch(profileFile: string, opts: PatchOpts): void {
 	const plan = buildPatchPlan(profile, {
 		hotCumulativeShare: opts.threshold,
 		vendorRoot: opts.vendorRoot,
+		repoRoot: repoRoot(),
 	});
+	const tp = plan.crates.filter(c => c.kind === "third-party").length;
+	const ws = plan.crates.filter(c => c.kind === "workspace").length;
 	console.log(
-		`  plan: ${plan.crates.length} crate(s), ${plan.crates.reduce((n, c) => n + c.hot.length, 0)} hot fn(s), ${plan.crates.reduce((n, c) => n + c.cold.length, 0)} cold fn(s)`
+		`  plan: ${plan.crates.length} crate(s) (${tp} third-party + ${ws} workspace), ${plan.crates.reduce((n, c) => n + c.hot.length, 0)} hot fn(s), ${plan.crates.reduce((n, c) => n + c.cold.length, 0)} cold fn(s)`
 	);
 	if (opts.planOut) {
 		writeFileSync(opts.planOut, JSON.stringify(plan, null, 2) + "\n");
@@ -325,17 +329,23 @@ function cmdPatch(profileFile: string, opts: PatchOpts): void {
 		console.log("  Cargo.toml [patch.crates-io] managed block unchanged");
 	}
 	if (opts.apply) {
-		// Rewrite vendored sources in place.
+		// Rewrite vendored sources (third-party) and workspace sources
+		// (in-place) — the dispatch is by `c.kind`.
 		const vendor = opts.vendorRoot ?? plan.vendor_root;
 		const vendorAbs = vendor.startsWith("/") ? vendor : join(repoRoot(), vendor);
 		for (const c of plan.crates) {
-			const dir = join(vendorAbs, c.crate);
+			const dir = c.kind === "workspace"
+				? join(repoRoot(), "crates", c.crate)
+				: join(vendorAbs, c.crate);
 			if (!existsSync(dir)) {
-				console.log(`  skip ${c.crate}: ${dir} does not exist (run 'cargo vendor' first)`);
+				const hint = c.kind === "workspace"
+					? `(workspace member directory not found)`
+					: `(run 'cargo vendor' first)`;
+				console.log(`  skip ${c.crate}: ${dir} does not exist ${hint}`);
 				continue;
 			}
 			const r = applyPlanToVendoredCrate(dir, c);
-			console.log(`  ${c.crate}: ${r.totalChanges} edit(s) across ${r.files.length} file(s)`);
+			console.log(`  ${c.kind === "workspace" ? "[workspace] " : ""}${c.crate}: ${r.totalChanges} edit(s) across ${r.files.length} file(s)`);
 		}
 	} else {
 		console.log("  (rewrite skipped; pass --apply to inject markers into vendored sources)");
@@ -353,6 +363,28 @@ function cmdPatchRevert(): void {
 		console.log("  removed managed [patch.crates-io] block");
 	} else {
 		console.log("  no managed [patch.crates-io] block present");
+	}
+	// Walk every workspace crate dir and strip any leftover per-fn markers
+	// + lib-header block. Idempotent: clean repos see zero changes.
+	const cratesRoot = join(repoRoot(), "crates");
+	if (existsSync(cratesRoot)) {
+		let totalReverted = 0;
+		let cratesTouched = 0;
+		for (const ent of readdirSync(cratesRoot, { withFileTypes: true })) {
+			if (!ent.isDirectory()) continue;
+			const dir = join(cratesRoot, ent.name);
+			const r = revertWorkspaceCrate(dir);
+			if (r.totalChanges > 0) {
+				cratesTouched++;
+				totalReverted += r.totalChanges;
+				console.log(`  reverted [workspace] ${ent.name}: ${r.totalChanges} edit(s) across ${r.files.length} file(s)`);
+			}
+		}
+		if (cratesTouched === 0) {
+			console.log("  no workspace per-fn markers present");
+		} else {
+			console.log(`  total: ${totalReverted} edit(s) across ${cratesTouched} workspace crate(s)`);
+		}
 	}
 }
 

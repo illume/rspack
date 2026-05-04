@@ -882,6 +882,8 @@ ensureLibHeader,
 extractFunctionName,
 removePatchSection,
 renderCargoPatchSection,
+revertSourceMarkers,
+revertWorkspaceCrate,
 rewriteSource,
 stripLibHeader,
 writePatchSection,
@@ -1112,5 +1114,149 @@ listFiles: () => Object.keys(files),
 });
 assert.equal(result.totalChanges, 0);
 assert.equal(writes["/v/swc/src/lib.rs"], undefined);
+});
+});
+
+describe("buildPatchPlan workspace-crate detection", () => {
+it("classifies crates as workspace when isWorkspaceMember returns true", () => {
+const profile = {
+schema_version: 1,
+git_sha: "x", created_at: "t", rustc_version: null, command: "c",
+total_samples: 100,
+by_crate: [
+{ crate: "rspack_core", samples: 60, pct: 0.6 },
+{ crate: "swc_ecma_minifier", samples: 40, pct: 0.4 },
+],
+top_symbols: [
+{ symbol: "rspack_core::module::build", crate: "rspack_core", samples: 60 },
+{ symbol: "swc_ecma_minifier::compress::run", crate: "swc_ecma_minifier", samples: 40 },
+],
+} as const;
+const plan = buildPatchPlan(profile as any, {
+hotCumulativeShare: 0.99,
+isWorkspaceMember: (c) => c === "rspack_core",
+});
+const rs = plan.crates.find(c => c.crate === "rspack_core")!;
+const swc = plan.crates.find(c => c.crate === "swc_ecma_minifier")!;
+assert.equal(rs.kind, "workspace");
+assert.equal(rs.patchPath, "crates/rspack_core");
+assert.equal(swc.kind, "third-party");
+assert.equal(swc.patchPath, "vendor/swc_ecma_minifier");
+});
+});
+
+describe("renderCargoPatchSection with workspace crates", () => {
+it("emits [patch.crates-io] only for third-party; lists workspace crates as comments", () => {
+const plan: PatchPlan = {
+schema_version: 1, created_at: "t", threshold: 0.5, vendor_root: "vendor",
+crates: [
+{ crate: "swc_ecma_minifier", patchPath: "vendor/swc_ecma_minifier", kind: "third-party", defaultDecision: "cold", hot: [{ symbol: "X", fnName: "f", pct: 0.1, decision: "hot" }], cold: [] },
+{ crate: "rspack_core", patchPath: "crates/rspack_core", kind: "workspace", defaultDecision: "cold", hot: [{ symbol: "Y", fnName: "g", pct: 0.05, decision: "hot" }], cold: [] },
+],
+};
+const t = renderCargoPatchSection(plan);
+assert.match(t, /\[patch\.crates-io\]/);
+assert.match(t, /swc_ecma_minifier = \{ path = "vendor\/swc_ecma_minifier" \}/);
+// Workspace crate must NOT appear as a [patch.crates-io] entry.
+assert.doesNotMatch(t, /^rspack_core = \{ path/m);
+// Nor as a [profile.release.package.X] override (the workspace-default
+// `opt-level = "z"` covers it).
+assert.doesNotMatch(t, /\[profile\.release\.package\.rspack_core\]/);
+// But it should appear as a traceability comment.
+assert.match(t, /Workspace crate.*in-place/);
+assert.match(t, /rspack_core .*crates\/rspack_core/);
+});
+it("omits the [patch.crates-io] header when only workspace crates are in the plan", () => {
+const plan: PatchPlan = {
+schema_version: 1, created_at: "t", threshold: 0.5, vendor_root: "vendor",
+crates: [
+{ crate: "rspack_core", patchPath: "crates/rspack_core", kind: "workspace", defaultDecision: "cold", hot: [{ symbol: "X", fnName: "f", pct: 0.1, decision: "hot" }], cold: [] },
+],
+};
+const t = renderCargoPatchSection(plan);
+assert.doesNotMatch(t, /\[patch\.crates-io\]/);
+assert.doesNotMatch(t, /\[profile\.release\.package\./);
+assert.match(t, /rspack_core .*crates\/rspack_core/);
+});
+});
+
+describe("revertSourceMarkers", () => {
+it("strips per-fn markers but leaves user attributes intact", () => {
+const src = [
+"impl Foo {",
+"    #[optimize(speed)] // pgo-managed",
+"    pub fn hot(&self) {}",
+"    #[optimize(size)] // pgo-managed",
+"    fn cold(&self) {}",
+"    #[inline(always)]",
+"    fn user_attr(&self) {}",
+"}",
+"",
+].join("\n");
+const { content, changed } = revertSourceMarkers(src);
+assert.equal(changed, 2);
+assert.doesNotMatch(content, /pgo-managed/);
+assert.match(content, /#\[inline\(always\)\]\n\s*fn user_attr/);
+assert.match(content, /pub fn hot/);
+assert.match(content, /fn cold/);
+});
+it("is a no-op on clean source", () => {
+const src = "fn f() {}\nfn g() {}\n";
+const { content, changed } = revertSourceMarkers(src);
+assert.equal(changed, 0);
+assert.equal(content, src);
+});
+it("round-trips with rewriteSource for byte-identical revert", () => {
+const original = [
+"impl Foo {",
+"    pub fn hot(&self) {}",
+"    fn cold(&self) {}",
+"}",
+"",
+].join("\n");
+const after = rewriteSource(original, new Set(["hot"]), new Set(["cold"]));
+const reverted = revertSourceMarkers(after.content);
+assert.equal(reverted.content, original);
+});
+});
+
+describe("revertWorkspaceCrate", () => {
+it("strips lib header + per-fn markers; idempotent on clean source", () => {
+const files: Record<string, string> = {
+"/c/src/lib.rs": [
+"// pgo-managed: profile-guided optimisation markers begin",
+"#![feature(optimize_attribute)]",
+"// pgo-managed: profile-guided optimisation markers end",
+"",
+"pub mod m;",
+"",
+].join("\n"),
+"/c/src/m.rs": [
+"#[optimize(speed)] // pgo-managed",
+"pub fn hot() {}",
+"fn untouched() {}",
+"",
+].join("\n"),
+};
+const writes: Record<string, string> = {};
+const result = revertWorkspaceCrate("/c", {
+readFile: (p) => files[p],
+writeFile: (p, c) => { writes[p] = c; },
+listFiles: () => Object.keys(files),
+});
+assert.equal(result.totalChanges, 2); // 1 header + 1 per-fn
+assert.doesNotMatch(writes["/c/src/lib.rs"], /pgo-managed/);
+assert.match(writes["/c/src/lib.rs"], /pub mod m;/);
+assert.doesNotMatch(writes["/c/src/m.rs"], /pgo-managed/);
+assert.match(writes["/c/src/m.rs"], /pub fn hot/);
+// Re-running on the cleaned content is a no-op.
+const clean = { ...writes };
+const writes2: Record<string, string> = {};
+const r2 = revertWorkspaceCrate("/c", {
+readFile: (p) => clean[p],
+writeFile: (p, c) => { writes2[p] = c; },
+listFiles: () => Object.keys(clean),
+});
+assert.equal(r2.totalChanges, 0);
 });
 });
