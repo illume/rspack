@@ -172,6 +172,46 @@ function cmdRebuild(): void {
 	}
 }
 
+/**
+ * One-shot "build a debug-info-bearing binding, then perf-record the
+ * vitest bench harness against it" wrapper. Codifies the recipe documented
+ * in PGO.md → "Profile capture caveat: stripped binding ≠ attributable
+ * samples": the production release binding is built with `strip=true`, so
+ * `perf script` reports every cdylib sample as `[unknown]`. The
+ * `build:binding:profiling` profile keeps debug info + unwind tables, so
+ * `perf record --call-graph dwarf` against the bench harness produces a
+ * profile that attributes samples back to rspack workspace fns (the ones
+ * that drive bench cases like "Traverse module graph by dependencies",
+ * "collect imported identifiers", etc.) — which is exactly what the
+ * function-level patch pass needs to find more hot fns to lift back to
+ * `=speed` while keeping the workspace `=z` default.
+ */
+function cmdProfileBench(opts: { skipBuild?: boolean; benchArgs?: string[] }): string {
+	if (!opts.skipBuild) {
+		step("build profiling binding (debug-info-bearing, unwind-tables enabled)");
+		const r = spawnSync("pnpm", ["run", "build:binding:profiling"], {
+			cwd: repoRoot(),
+			stdio: "inherit",
+			env,
+		});
+		if (r.status !== 0) {
+			throw new Error(`build:binding:profiling exited ${r.status}`);
+		}
+	}
+	// Run the project's existing vitest bench harness under perf. The
+	// extra `--` chain is needed so flags like `--run` reach vitest, not
+	// pnpm.
+	const benchCmd = [
+		"pnpm",
+		"--filter",
+		"bench",
+		"run",
+		"bench",
+		...(opts.benchArgs && opts.benchArgs.length > 0 ? ["--", ...opts.benchArgs] : []),
+	];
+	return cmdProfile(benchCmd);
+}
+
 function cmdValidate(): void {
 	step("validate artifact");
 	// Find any rspack.<platform>.node under crates/node_binding/ or npm/.
@@ -393,6 +433,7 @@ function usage(): never {
 		[
 			"Usage:",
 			"  pgo-run.ts profile  -- <bench-cmd> [args...]",
+			"  pgo-run.ts profile-bench [--skip-build] [-- <extra vitest args>]",
 			"  pgo-run.ts apply    [--profile <path>] [--threshold <0..1>] [--hot-opt-level <lvl>] [--cold-opt-level <lvl>] [--workspace-default <lvl>] [--aggressive-size] [--no-package-overrides] [--always-hot <crate>[,<crate>...]] [--always-cold <crate>[,<crate>...]]",
 			"  pgo-run.ts revert",
 			"  pgo-run.ts rebuild",
@@ -423,6 +464,18 @@ export async function main(args: string[]): Promise<void> {
 			const cmd = cmdStart === -1 ? rest : rest.slice(cmdStart + 1);
 			if (cmd.length === 0) usage();
 			cmdProfile(cmd);
+			return;
+		}
+		case "profile-bench": {
+			let skipBuild = false;
+			const benchArgs: string[] = [];
+			const cmdStart = rest.indexOf("--");
+			const flagsArgs = cmdStart === -1 ? rest : rest.slice(0, cmdStart);
+			if (cmdStart !== -1) benchArgs.push(...rest.slice(cmdStart + 1));
+			for (const a of flagsArgs) {
+				if (a === "--skip-build") skipBuild = true;
+			}
+			cmdProfileBench({ skipBuild, benchArgs });
 			return;
 		}
 		case "apply": {

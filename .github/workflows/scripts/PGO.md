@@ -1099,3 +1099,29 @@ binding:
    The default stays `dwarf` for back-compat with interactive
    perf users who want full callchains for `perf report` /
    `perf annotate` (used by `pgo-run.ts report`).
+
+3. **One-shot wrapper.** `pgo-run.ts profile-bench` codifies the
+   recipe: it runs `pnpm run build:binding:profiling` (so debug
+   info + unwind tables stay in the cdylib) and then perf-records
+   the project's vitest bench harness against it, writing the
+   resulting `perf_profiles/<sha>.json`. Pass `--skip-build` if a
+   profiling binding already exists. Combine with
+   `PGO_CALL_GRAPH=none` for the fast attribution-only path:
+
+   ```bash
+   PGO_CALL_GRAPH=none node --experimental-strip-types \
+     .github/workflows/scripts/pgo-run.ts profile-bench
+   # then, against the bench-shaped profile this just produced:
+   node --experimental-strip-types .github/workflows/scripts/pgo-run.ts \
+       apply --workspace-default z --no-package-overrides
+   node --experimental-strip-types .github/workflows/scripts/pgo-run.ts \
+       patch --threshold 0.95 --apply
+   ```
+
+   The `apply --no-package-overrides` step keeps the workspace
+   `=z` shrinkage but avoids pinning hot crates back to `=3`; the
+   `patch --threshold 0.95 --apply` step then injects per-fn
+   `#[optimize(speed)]` markers on the rspack workspace fns the
+   *bench* profile actually exercises (graph traversal, stats,
+   napi bridge, …) — so the regressed bench cases get speed
+   codegen on their hot paths without giving up the size win.
