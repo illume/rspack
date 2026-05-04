@@ -55,6 +55,7 @@ import {
 	revertWorkspaceCrate,
 	writePatchSection,
 } from "./pgo-patch.ts";
+import { vendorCratesFromPlan } from "./pgo-vendor.ts";
 
 function repoRoot(): string {
 	return env.REPO_ROOT ?? process.cwd();
@@ -394,6 +395,48 @@ function cmdPatch(profileFile: string, opts: PatchOpts): void {
 	}
 }
 
+interface VendorOpts {
+	threshold?: number;
+	vendorRoot?: string;
+	force?: boolean;
+}
+
+async function cmdVendor(profileFile: string, opts: VendorOpts): Promise<void> {
+	step(`vendor (selective crates.io download) from ${profileFile}`);
+	const profile = readProfile(profileFile);
+	// We intentionally skip the `isVendorAvailable` filter here: the whole
+	// point of `vendor` is to *create* the vendored directories that
+	// `buildPatchPlan`'s default would otherwise drop.
+	const plan = buildPatchPlan(profile, {
+		hotCumulativeShare: opts.threshold,
+		vendorRoot: opts.vendorRoot,
+		repoRoot: repoRoot(),
+		isVendorAvailable: () => true,
+	});
+	const tp = plan.crates.filter((c) => c.kind === "third-party");
+	console.log(
+		`  ${tp.length} third-party crate(s) to vendor (workspace crates skipped)`,
+	);
+	if (tp.length === 0) {
+		console.log("  nothing to do; rerun pgo-run.ts patch to inspect the plan");
+		return;
+	}
+	const { results, skipped } = await vendorCratesFromPlan(plan, {
+		repoRoot: repoRoot(),
+		force: opts.force,
+	});
+	for (const r of results) {
+		if (r.skipped) {
+			console.log(`  skip ${r.name}@${r.version}: ${r.reason ?? "already vendored"}`);
+		} else {
+			console.log(`  vendored ${r.name}@${r.version} → ${r.destDir}`);
+		}
+	}
+	for (const s of skipped) {
+		console.log(`  skip ${s.crate}: ${s.reason}`);
+	}
+}
+
 function cmdPatchRevert(): void {
 	step("patch revert");
 	const before = readFileSync(cargoTomlPath(), "utf8");
@@ -443,6 +486,7 @@ function usage(): never {
 			"  pgo-run.ts bench    --label <name>",
 			"  pgo-run.ts bench-compare <baseline.json> <candidate.json>",
 			"  pgo-run.ts patch    [--profile <path>] [--threshold <0..1>] [--vendor-root <dir>] [--apply] [--plan-out <file>]",
+			"  pgo-run.ts vendor   [--profile <path>] [--threshold <0..1>] [--vendor-root <dir>] [--force]",
 			"  pgo-run.ts patch-revert",
 			"  pgo-run.ts all      [--threshold <0..1>] [--hot-opt-level <lvl>] [--cold-opt-level <lvl>] -- <bench-cmd> [args...]",
 		].join("\n")
@@ -552,6 +596,20 @@ export async function main(args: string[]): Promise<void> {
 		case "patch-revert":
 			cmdPatchRevert();
 			return;
+		case "vendor": {
+			const vendorOpts: VendorOpts = {};
+			let profile: string | undefined;
+			for (let i = 0; i < rest.length; i++) {
+				const a = rest[i];
+				if (a === "--profile") profile = rest[++i];
+				else if (a === "--threshold") vendorOpts.threshold = Number(rest[++i]);
+				else if (a === "--vendor-root") vendorOpts.vendorRoot = rest[++i];
+				else if (a === "--force") vendorOpts.force = true;
+			}
+			const path = profile ?? profilePath(repoRoot(), gitSha());
+			await cmdVendor(path, vendorOpts);
+			return;
+		}
 		case "all": {
 			const cmdStart = rest.indexOf("--");
 			const flagsArgs = cmdStart === -1 ? [] : rest.slice(0, cmdStart);

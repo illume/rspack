@@ -869,6 +869,230 @@ assert.throws(() => readBenchResult(path), /schema mismatch/);
 });
 });
 
+// -------- pgo-vendor --------
+
+import {
+	parseLockfileVersion,
+	vendorCrateFromCratesIo,
+	vendorCratesFromPlan,
+	defaultTarballUrl,
+} from "./pgo-vendor.ts";
+
+describe("parseLockfileVersion", () => {
+	it("returns the version for a unique [[package]] entry", () => {
+		const lock = `# generated
+[[package]]
+name = "napi"
+version = "3.8.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "serde_json"
+version = "1.0.140"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+`;
+		assert.equal(parseLockfileVersion(lock, "napi"), "3.8.5");
+		assert.equal(parseLockfileVersion(lock, "serde_json"), "1.0.140");
+	});
+
+	it("returns null when the package is missing", () => {
+		const lock = `[[package]]\nname = "other"\nversion = "1.0.0"\n`;
+		assert.equal(parseLockfileVersion(lock, "napi"), null);
+	});
+
+	it("returns null when there are multiple distinct versions (caller must disambiguate)", () => {
+		const lock = `[[package]]
+name = "syn"
+version = "1.0.109"
+
+[[package]]
+name = "syn"
+version = "2.0.50"
+`;
+		assert.equal(parseLockfileVersion(lock, "syn"), null);
+	});
+
+	it("returns the unique version when duplicate entries agree", () => {
+		const lock = `[[package]]
+name = "x"
+version = "1.0.0"
+
+[[package]]
+name = "x"
+version = "1.0.0"
+`;
+		assert.equal(parseLockfileVersion(lock, "x"), "1.0.0");
+	});
+
+	it("is CRLF-safe (Windows checkouts)", () => {
+		const lock = `[[package]]\r\nname = "napi"\r\nversion = "3.8.5"\r\n`;
+		assert.equal(parseLockfileVersion(lock, "napi"), "3.8.5");
+	});
+
+	it("escapes regex metacharacters in the crate name", () => {
+		// "rspack-core" doesn't really exist with a hyphen on crates.io, but
+		// names with `-` are common and `.` could appear in pathological
+		// names; the parser must not interpret them as regex metacharacters.
+		const lock = `[[package]]\nname = "foo-bar"\nversion = "0.1.0"\n`;
+		assert.equal(parseLockfileVersion(lock, "foo-bar"), "0.1.0");
+		assert.equal(parseLockfileVersion(lock, "foo.bar"), null);
+	});
+});
+
+describe("defaultTarballUrl", () => {
+	it("uses the crates.io download API path", () => {
+		assert.equal(
+			defaultTarballUrl("napi", "3.8.5"),
+			"https://crates.io/api/v1/crates/napi/3.8.5/download",
+		);
+	});
+	it("URL-encodes name and version segments", () => {
+		assert.equal(
+			defaultTarballUrl("foo+bar", "1.0.0+meta"),
+			"https://crates.io/api/v1/crates/foo%2Bbar/1.0.0%2Bmeta/download",
+		);
+	});
+});
+
+describe("vendorCrateFromCratesIo", () => {
+	it("downloads via the injected fetcher and writes via the injected extractor", async () => {
+		let fetchedUrl: string | null = null;
+		const fakeBytes = new Uint8Array([0xde, 0xad, 0xbe, 0xef]);
+		let extractCallDest: string | null = null;
+		let extractedBytes: Uint8Array | null = null;
+		const result = await vendorCrateFromCratesIo({
+			name: "napi",
+			version: "3.8.5",
+			destDir: mkdtempSync(join(tmpdir(), "pgo-vendor-test-")),
+			download: {
+				fetchTarball: async (url: string) => {
+					fetchedUrl = url;
+					return fakeBytes;
+				},
+			},
+			extract: (bytes, dest) => {
+				extractedBytes = bytes;
+				extractCallDest = dest;
+				// Simulate a successful tar extract by writing a Cargo.toml.
+				writeFileSync(join(dest, "Cargo.toml"), "[package]\nname=\"napi\"\nversion=\"3.8.5\"\n");
+			},
+		});
+		assert.equal(result.skipped, false);
+		assert.equal(result.name, "napi");
+		assert.equal(result.version, "3.8.5");
+		assert.equal(fetchedUrl, "https://crates.io/api/v1/crates/napi/3.8.5/download");
+		assert.equal(extractCallDest, result.destDir);
+		assert.deepEqual(extractedBytes, fakeBytes);
+	});
+
+	it("is idempotent: skips when destDir/Cargo.toml already exists", async () => {
+		const dest = mkdtempSync(join(tmpdir(), "pgo-vendor-test-"));
+		writeFileSync(join(dest, "Cargo.toml"), "[package]\nname=\"x\"\nversion=\"0.1.0\"\n");
+		let fetched = false;
+		const result = await vendorCrateFromCratesIo({
+			name: "x",
+			version: "0.1.0",
+			destDir: dest,
+			download: {
+				fetchTarball: async () => {
+					fetched = true;
+					return new Uint8Array();
+				},
+			},
+			extract: () => {
+				throw new Error("extract should not be invoked when skipping");
+			},
+		});
+		assert.equal(result.skipped, true);
+		assert.equal(fetched, false, "fetchTarball must not be called when idempotent-skip");
+	});
+});
+
+describe("vendorCratesFromPlan", () => {
+	const fakeLock = `[[package]]
+name = "napi"
+version = "3.8.5"
+
+[[package]]
+name = "serde_json"
+version = "1.0.140"
+`;
+
+	it("vendors only third-party crates; skips workspace crates", async () => {
+		const plan: PatchPlan = {
+			schema_version: 1,
+			created_at: "2026-05-04",
+			threshold: 0.95,
+			vendor_root: "vendor",
+			crates: [
+				{ crate: "napi", patchPath: "vendor/napi", kind: "third-party", defaultDecision: "cold", hot: [{ symbol: "X", fnName: "f", pct: 0.05, decision: "hot" }], cold: [] },
+				{ crate: "rspack_core", patchPath: "crates/rspack_core", kind: "workspace", defaultDecision: "cold", hot: [{ symbol: "Y", fnName: "g", pct: 0.01, decision: "hot" }], cold: [] },
+			],
+		};
+		const calls: string[] = [];
+		const r = await vendorCratesFromPlan(plan, {
+			repoRoot: "/fake",
+			lockContent: fakeLock,
+			vendorOne: async (o) => {
+				calls.push(`${o.name}@${o.version}→${o.destDir}`);
+				return { name: o.name, version: o.version, destDir: o.destDir, skipped: false };
+			},
+		});
+		assert.deepEqual(calls, ["napi@3.8.5→/fake/vendor/napi"]);
+		assert.equal(r.results.length, 1);
+		assert.equal(r.skipped.length, 1);
+		assert.equal(r.skipped[0].crate, "rspack_core");
+		assert.match(r.skipped[0].reason, /workspace/);
+	});
+
+	it("skips third-party crates whose version cannot be uniquely resolved", async () => {
+		const plan: PatchPlan = {
+			schema_version: 1,
+			created_at: "2026-05-04",
+			threshold: 0.95,
+			vendor_root: "vendor",
+			crates: [
+				{ crate: "missing_crate", patchPath: "vendor/missing_crate", kind: "third-party", defaultDecision: "cold", hot: [{ symbol: "X", fnName: "f", pct: 0.05, decision: "hot" }], cold: [] },
+			],
+		};
+		let invoked = false;
+		const r = await vendorCratesFromPlan(plan, {
+			repoRoot: "/fake",
+			lockContent: fakeLock,
+			vendorOne: async (o) => {
+				invoked = true;
+				return { name: o.name, version: o.version, destDir: o.destDir, skipped: false };
+			},
+		});
+		assert.equal(invoked, false);
+		assert.equal(r.results.length, 0);
+		assert.equal(r.skipped.length, 1);
+		assert.match(r.skipped[0].reason, /no unique version/);
+	});
+
+	it("respects a custom vendor_root from the plan", async () => {
+		const plan: PatchPlan = {
+			schema_version: 1,
+			created_at: "2026-05-04",
+			threshold: 0.95,
+			vendor_root: "third_party",
+			crates: [
+				{ crate: "napi", patchPath: "third_party/napi", kind: "third-party", defaultDecision: "cold", hot: [{ symbol: "X", fnName: "f", pct: 0.05, decision: "hot" }], cold: [] },
+			],
+		};
+		let dest: string | null = null;
+		await vendorCratesFromPlan(plan, {
+			repoRoot: "/fake",
+			lockContent: fakeLock,
+			vendorOne: async (o) => {
+				dest = o.destDir;
+				return { name: o.name, version: o.version, destDir: o.destDir, skipped: false };
+			},
+		});
+		assert.equal(dest, "/fake/third_party/napi");
+	});
+});
+
 // -------- pgo-patch --------
 
 import {

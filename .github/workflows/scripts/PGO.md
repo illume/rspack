@@ -1217,3 +1217,77 @@ on workstations that haven't run `cargo vendor` yet. Tests can
 inject a mock via `BuildPatchPlanOptions.isVendorAvailable`;
 when `repoRoot` is unset the default is "always available", so
 legacy unit-test plans built in isolation are unchanged.
+
+### Selective vendoring: `pgo-run.ts vendor` (no full `cargo vendor` of the dep tree)
+
+Running plain `cargo vendor` materialises the **full transitive
+dep tree** (~1000+ crates, ~1 GiB on disk) into `vendor/`, which
+is overkill when the patch plan only wants `#[optimize(speed)]`
+markers in a small handful of hot third-party crates (e.g.
+`napi`, `serde_json`, `hashbrown`). `pgo-run.ts vendor`
+materialises **only** those crates by downloading their
+crates.io tarballs directly:
+
+```bash
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts \
+    vendor --profile perf_profiles/<sha>.json --threshold 0.95
+```
+
+For each third-party crate in the patch plan it:
+
+1. Resolves the version from `Cargo.lock` (the same lockfile
+   `cargo build` consumes; see `parseLockfileVersion`).
+2. Downloads the registry tarball from
+   `https://crates.io/api/v1/crates/<name>/<version>/download`
+   (follows redirects, no extra dependency).
+3. Extracts to `vendor/<name>/` with `tar -xzf
+   --strip-components=1`.
+
+Workspace crates are skipped (they already live at
+`crates/<name>/`). Crates whose version cannot be uniquely
+resolved from `Cargo.lock` (multiple semver-incompatible
+versions in the dep graph) are skipped with a structured
+reason — surfacing instead of guessing. Re-running is
+idempotent: if `vendor/<crate>/Cargo.toml` already exists the
+download is skipped. Pass `--force` to re-extract.
+
+The output is byte-identical to what `cargo vendor` would
+produce for those crates (they're the same crates.io
+tarballs), so the same `[patch.crates-io] X = { path =
+"vendor/X" }` redirection that `pgo-run.ts patch` emits resolves
+correctly. The crate's transitive deps continue to flow through
+the normal registry index — that's the entire point of cargo's
+patch mechanism: it replaces a single node in the dep graph
+without forcing you to vendor the rest.
+
+#### Recipe: bench-shaped profile + selective vendor + per-fn `=speed` markers
+
+```bash
+# 1) Capture a bench-shaped profile (debug-info preserved by build:binding:profiling).
+PGO_CALL_GRAPH=fp node --experimental-strip-types \
+    .github/workflows/scripts/pgo-run.ts profile-bench
+
+# 2) Selectively vendor the hot third-party crates the profile flags.
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts \
+    vendor --threshold 0.95
+
+# 3) Apply the workspace-default = "z" knob (no per-package overrides;
+#    per-fn markers handle the speed exceptions).
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts \
+    apply --workspace-default z --no-package-overrides
+
+# 4) Inject [patch.crates-io] + per-fn #[optimize(speed)] markers.
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts \
+    patch --threshold 0.95 --apply
+
+# 5) Rebuild + bench.
+pnpm run build:binding:release
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts \
+    bench --label workspace-z-fns-speed-vendored
+```
+
+To revert: `pgo-run.ts patch-revert` + `pgo-run.ts revert`. The
+`vendor/` tree can be deleted manually (it's gitignored). The
+revert is byte-identical for `Cargo.toml` and every patched
+workspace `crates/<name>/src/**.rs` file.
+
