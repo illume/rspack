@@ -218,22 +218,21 @@ export function runPerfAndScript(
 	perfDataPath: string
 ): string {
 	if (cmd.length === 0) throw new Error("empty command");
-	const record = spawnSync(
-		"perf",
-		[
-			"record",
-			"-F",
-			"999",
-			"-g",
-			"--call-graph",
-			"dwarf",
-			"-o",
-			perfDataPath,
-			"--",
-			...cmd,
-		],
-		{ cwd, stdio: "inherit" }
-	);
+	// Call-graph mode is configurable via PGO_CALL_GRAPH because the default
+	// `--call-graph dwarf` triggers addr2line on every unique IP at perf-record
+	// shutdown, which can take 15+ minutes on a stripped 50MB cdylib. The
+	// parser only consumes leaf-symbol samples (`-F` of perf script doesn't
+	// include callchains), so callers who only need crate/fn-level
+	// attribution (the PGO loop) can set `PGO_CALL_GRAPH=none` to skip the
+	// expensive unwind step. Set to `fp` for cheap frame-pointer chains, or
+	// leave unset for the default DWARF mode used by interactive perf users.
+	const cgMode = (env.PGO_CALL_GRAPH ?? "dwarf").toLowerCase();
+	const args = ["record", "-F", "999"];
+	if (cgMode !== "none") {
+		args.push("-g", "--call-graph", cgMode);
+	}
+	args.push("-o", perfDataPath, "--", ...cmd);
+	const record = spawnSync("perf", args, { cwd, stdio: "inherit" });
 	if (record.status !== 0) {
 		throw new Error(`perf record exited ${record.status}`);
 	}

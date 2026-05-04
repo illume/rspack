@@ -1005,3 +1005,97 @@ node --experimental-strip-types .github/workflows/scripts/pgo-run.ts \
 `--always-hot` is the surgical override; re-profiling is the
 correct general answer.
 
+
+### Workspace-crate per-fn `=speed` markers (workspace mode)
+
+The cargo-patch path (per-fn `#[optimize(speed)]` / `=size`) was
+originally wired only for **third-party** crates: it edits a
+vendored copy under `vendor/<crate>/` and adds a
+`[patch.crates-io]` redirection so cargo picks up the rewritten
+source. Workspace crates (`rspack_core`, `rspack_plugin_javascript`,
+…) live at `crates/<name>/` already, so they need a different
+strategy: there is no `[patch.crates-io]` indirection — we just
+edit them in place under sentinel-managed comments and revert
+byte-identically afterwards.
+
+`buildPatchPlan(profile, { repoRoot, … })` (and the wrapper
+`pgo-run.ts patch …`, which now passes `repoRoot` automatically)
+classifies any crate whose `<repoRoot>/crates/<name>/Cargo.toml`
+exists as `kind: "workspace"`. For those:
+
+- No `[patch.crates-io]` entry is emitted.
+- No `[profile.release.package.<crate>] opt-level = "z"` is
+  emitted — the workspace knob set by
+  `apply --workspace-default z` covers it.
+- `patch --apply` walks `crates/<name>/src/**.rs` directly,
+  injects `#![feature(optimize_attribute)]` at `lib.rs` and
+  `#[optimize(speed)] // pgo-managed` on each hot fn.
+- `patch-revert` walks every `crates/*/` and strips the markers
+  (and the lib header) byte-identically. Idempotent — clean repos
+  see zero changes.
+
+Worked example against the committed minifier-shaped profile,
+threshold 0.99 (exposes the lower-pct workspace symbols that a
+0.50-threshold patch misses):
+
+```bash
+$ node --experimental-strip-types .github/workflows/scripts/pgo-run.ts \
+    patch --profile perf_profiles/bb4b6f7e2acf423926145b94eb1bea19801ee4c9.json \
+          --threshold 0.99 --apply
+plan: 14 crate(s) (13 third-party + 1 workspace), 75 hot fn(s), 0 cold fn(s)
+…
+[workspace] rspack_plugin_javascript: 5 edit(s) across 4 file(s)
+```
+
+Five edits land in `crates/rspack_plugin_javascript/`:
+`#![feature(optimize_attribute)]` in `lib.rs` plus
+`#[optimize(speed)]` on `JavascriptParser::evaluate_expression`,
+`ScopeInfoDB::get`, and the two other `get` impls in that crate
+that share the same fn-name regex.
+
+Clean revert:
+
+```bash
+$ node --experimental-strip-types .github/workflows/scripts/pgo-run.ts patch-revert
+[pgo-run] ▶ patch revert
+  removed managed [patch.crates-io] block
+  reverted [workspace] rspack_plugin_javascript: 5 edit(s) across 4 file(s)
+
+$ git diff crates/  # ← empty
+```
+
+### Profile capture caveat: stripped binding ≠ attributable samples
+
+`pgo-run.ts profile -- <bench cmd>` runs `perf record -F 999 -g
+--call-graph dwarf` by default. Two practical issues to know
+about when re-recording on top of the shipped release-profile
+binding:
+
+1. **Symbols are stripped** in the production build
+   (`crates/node_binding/scripts/build.js` sets `strip=true`),
+   so `perf script` reports every binding sample as
+   `[unknown] (rspack.linux-x64-gnu.node)` and the JSON ends up
+   with `0 samples, 0 crates`. To re-record a bench-shaped
+   profile, build with the **profiling** profile
+   (`pnpm run build:binding:profiling`) or temporarily flip
+   `strip=false` for the variant you're measuring; the call
+   graph won't change vs. release because LTO/cgu are the same.
+
+2. **`--call-graph dwarf` post-processing is O(n²) on big
+   `.node` files.** With ~50 MiB of stripped cdylib and 700+
+   samples, `addr2line` (invoked by perf at exit to resolve
+   inline frames) can run for **15+ minutes**. The PGO loop only
+   reads leaf-symbol samples from `perf script -F
+   …,event,ip,sym,dso` — it never consumes call chains — so set
+   `PGO_CALL_GRAPH=none` (or `fp` for cheap frame-pointer
+   chains) when running the profiler purely for crate/fn
+   attribution:
+
+   ```bash
+   PGO_CALL_GRAPH=none node --experimental-strip-types \
+     .github/workflows/scripts/pgo-run.ts profile -- pnpm -C tests/bench bench
+   ```
+
+   The default stays `dwarf` for back-compat with interactive
+   perf users who want full callchains for `perf report` /
+   `perf annotate` (used by `pgo-run.ts report`).
