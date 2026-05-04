@@ -144,14 +144,21 @@ upstream, but we can vendor + override them via `[patch.crates-io]`.
    - At each crate's `src/lib.rs`:
      ```rust
      #![feature(optimize_attribute)]
-     #![cfg_attr(not(any(test, doctest, miri)), optimize(size))]
      ```
-     so the *default* for everything in the crate is size.
+     This is the **only** crate-root attribute we emit. `#[optimize]` is
+     fn-only on nightly (rustc rejects `#![cfg_attr(..., optimize(size))]`
+     at the crate root with "`#[optimize]` can only be applied to
+     functions"). The crate-wide size default is delivered instead by a
+     `[profile.release.package.<crate>] opt-level = "z"` block emitted
+     into the same managed region of `Cargo.toml`.
    - Above each hot fn signature: `#[optimize(speed)] // pgo-managed`,
      lifting just that fn back to speed codegen.
    - Above each cold fn signature: `#[optimize(size)] // pgo-managed` —
-     redundant with the crate-level default, but kept explicit so the
-     intent is grep-able and the rewrite is verifiable.
+     redundant with the crate-level `opt-level = "z"`, but kept explicit
+     so the intent is grep-able and the rewrite is verifiable.
+   - The rewriter skips fn signatures that end in `;` rather than `{`
+     (required trait methods, `extern` declarations) — `#[optimize]` is
+     also rejected on those by rustc.
    The sentinel `// pgo-managed` makes the rewrite **idempotent**: re-runs
    recognise their own work and don't double-insert.
 
@@ -193,6 +200,92 @@ crates by attributable share: `swc_ecma_minifier`, `swc_ecma_ast`,
 `swc_ecma_parser`, `swc_ecma_utils`, `swc_ecma_transforms_base`,
 `swc_ecma_transforms_optimization`, `hstr`, `hashbrown`. The full plan is
 emitted as Markdown on stdout and (with `--plan-out`) as JSON.
+
+### Empirical run on the actual binding (cargo-patch + per-fn markers)
+
+Built and benched on the actual `rspack.linux-x64-gnu.node` with the
+production release flags + `nightly-2026-04-16` (`lto="fat"`, `cgu=1`,
+`strip=true`, `panic="abort"`, `-Zbuild-std=panic_abort,std`,
+`-Cforce-unwind-tables=no`, `--features plugin,info-level`). The two
+builds use the same source tree; the candidate adds a managed
+`[patch.crates-io]` + `[profile.release.package.X] opt-level = "z"` block
+covering the 8 hot crates plus rewritten `vendor/<crate>/src/**/*.rs`
+with `#[optimize(speed)]` on 18 hot fns and `#[optimize(size)]` on 44
+cold fns inside those same crates.
+
+| Variant | `.node` bytes | MiB | Δ size | Build time | Median runtime Δ (9 vitest benches) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| baseline (`opt-level = 3`) | 53,007,144 | 50.55 | — | 13m49s | — |
+| **patch-cargo-fns** (8 crates `=z` + 18 hot fns `=speed` + 44 cold fns `=size`) | **51,558,696** | **49.17** | **−2.73%** | **13m12s** | **−1.53%** (mean −1.08%, **faster**) |
+
+Per-benchmark deltas (negative = candidate faster):
+
+| Benchmark | Baseline (ms) | patch-cargo-fns (ms) | Δ |
+| --- | ---: | ---: | ---: |
+| Traverse module graph by dependencies | 0.110 | 0.112 | +1.73% |
+| Traverse module graph by connections | 0.021 | 0.021 | **−1.87%** |
+| Traverse compilation.modules | 0.003 | 0.003 | **−3.33%** |
+| stats.toJson() | 3.449 | 3.463 | +0.39% |
+| collect imported identifiers | 0.013 | 0.013 | **−1.53%** |
+| record module | 0.067 | 0.068 | +2.71% |
+| is css mod | 0.004 | 0.004 | **−2.38%** |
+| record chunk group | 0.002 | 0.002 | +4.55% |
+| external getResolve | 0.173 | 0.156 | **−9.94%** |
+
+**Read.** Compared to `apply --aggressive-size --threshold 0.95` (which
+flips the workspace default to `=z` and pins 18+ crates back at `=3` via
+`[profile.release.package.X]`, giving −24.65% size for **+5.56%** runtime
+cost), the cargo-patch + per-fn approach trades most of the size win for
+all of the runtime preservation: −2.73% size, −1.53% runtime — both
+moving in the right direction. Mechanism: only 8 crates participate, the
+rest of the binary (~95 crates) stays at workspace `opt-level = 3`, fat-
+LTO still inlines the hot fn bodies (which carry `#[optimize(speed)]`)
+into their callers, and only the cold helpers inside those 8 crates
+shrink. Compose with `apply --aggressive-size` for the larger size win
+on the long tail (see "What this composes with" above).
+
+Bench JSON files committed:
+- `perf_profiles/bench-a70f60a8ef14d63d6fe2f2c5bd045c6e5fb965dd-baseline-v2.json`
+- `perf_profiles/bench-a70f60a8ef14d63d6fe2f2c5bd045c6e5fb965dd-patch-cargo-fns.json`
+
+Reproducer:
+
+```bash
+# Baseline
+pnpm run build:binding:release
+cp crates/node_binding/rspack.linux-x64-gnu.node /tmp/baseline.node
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts \
+    bench --label baseline-v2
+
+# Patched
+mkdir -p vendor && for v in \
+  swc_ecma_minifier-52.0.2:swc_ecma_minifier \
+  swc_ecma_ast-23.0.0:swc_ecma_ast \
+  swc_ecma_parser-39.0.1:swc_ecma_parser \
+  swc_ecma_utils-29.1.0:swc_ecma_utils \
+  swc_ecma_transforms_base-42.0.0:swc_ecma_transforms_base \
+  swc_ecma_transforms_optimization-44.0.0:swc_ecma_transforms_optimization \
+  hstr-3.0.3:hstr hashbrown-0.16.1:hashbrown
+do
+  src=${v%%:*}; dst=${v##*:}
+  cp -r ~/.cargo/registry/src/index.crates.io-*/$src vendor/$dst
+  chmod -R u+w vendor/$dst
+done
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts \
+    patch --profile perf_profiles/bb4b6f7e2acf423926145b94eb1bea19801ee4c9.json \
+          --threshold 0.5 --apply
+pnpm run build:binding:release
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts \
+    bench --label patch-cargo-fns
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts \
+    bench-compare \
+        perf_profiles/bench-<sha>-baseline-v2.json \
+        perf_profiles/bench-<sha>-patch-cargo-fns.json
+```
+
+(`hashbrown` is multi-version in the Cargo.lock — 0.12.3, 0.14.5, 0.15.2,
+0.16.1; the patch only matches `^0.16` paths, the older versions keep
+using crates.io. Same shape if you choose to vendor only some versions.)
 
 ### What this composes with
 

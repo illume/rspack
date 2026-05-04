@@ -249,6 +249,17 @@ export function renderCargoPatchSection(plan: PatchPlan): string {
 	for (const c of plan.crates) {
 		lines.push(`${c.crate} = { path = "${c.patchPath}" }`);
 	}
+	// Crate-wide default for the patched crates: opt-level="z". The per-fn
+	// `#[optimize(speed)]` markers in the rewritten sources lift hot fns
+	// back up. We can't do this with `#![cfg_attr(..., optimize(size))]` at
+	// the lib root because rustc rejects `#[optimize]` on non-fn items
+	// ("`#[optimize]` can only be applied to functions"); the only way to
+	// affect the *whole* crate's codegen is the Cargo profile knob.
+	lines.push("");
+	for (const c of plan.crates) {
+		lines.push(`[profile.release.package.${c.crate}]`);
+		lines.push(`opt-level = "z"`);
+	}
 	lines.push(PATCH_END_MARKER);
 	return lines.join("\n") + "\n";
 }
@@ -294,12 +305,18 @@ const SIZE_ATTR = `#[optimize(size)] ${ATTR_SENTINEL}`;
  * check fails *loudly* (with the well-known feature-gate error) instead of
  * silently dropping the optimisation hint.
  */
-export function renderLibHeader(defaultDecision: "hot" | "cold"): string {
-	const dflt = defaultDecision === "hot" ? "speed" : "size";
+export function renderLibHeader(_defaultDecision: "hot" | "cold"): string {
+	// Note: `#[optimize(speed|size)]` is a *function-level* attribute on
+	// nightly (RFC 2867 / `optimize_attribute` feature). It cannot be applied
+	// at the crate root via `#![…]` — rustc rejects with "`#[optimize]` can
+	// only be applied to functions". So the lib header only enables the
+	// feature gate; the *crate-wide default* size optimisation is delivered
+	// via `[profile.release.package.<crate>] opt-level = "z"` in the
+	// generated `[patch.crates-io]` block, and the per-fn `#[optimize(speed)]`
+	// markers lift the hot fns back up.
 	return [
 		`// pgo-managed: profile-guided optimisation markers begin`,
 		`#![feature(optimize_attribute)]`,
-		`#![cfg_attr(not(any(test, doctest, miri)), optimize(${dflt}))]`,
 		`// pgo-managed: profile-guided optimisation markers end`,
 		"",
 	].join("\n");
@@ -355,6 +372,14 @@ export function rewriteSource(
 		// Skip if we already wrote this attribute above the fn.
 		const prev = i >= 2 ? lines[i - 2] : "";
 		if (prev.includes(ATTR_SENTINEL)) continue;
+		// `#[optimize]` is rejected by rustc on:
+		//   - required trait methods (declarations without a body)
+		//   - extern fn declarations (`extern "C" fn foo();`)
+		// Both end the signature with `;` instead of `{`. A signature can
+		// span multiple lines (e.g. `fn foo(\n  a: T,\n) -> U;`), so scan
+		// forward from this line until we see the first `{` or `;` outside
+		// of strings. Lightweight; gives up on very pathological cases.
+		if (isDeclarationOnly(lines, i)) continue;
 		// Splice the attribute line in. Use the same line ending as line i+1
 		// where possible, else "\n".
 		const eol = lines[i + 1] ?? "\n";
@@ -363,6 +388,38 @@ export function rewriteSource(
 		i += 2; // skip past the inserted pair
 	}
 	return { content: lines.join(""), changed };
+}
+
+/**
+ * Heuristic: starting at `lines[startIdx]` (a content cell containing a
+ * `fn NAME(...` opener), look ahead a bounded number of lines and decide
+ * whether this fn has a body (`{` first) or is a declaration (`;` first).
+ *
+ * We don't strip strings/comments — `;` inside a string before the body
+ * is rare in idiomatic Rust signatures and would only cause us to skip an
+ * unsafe-to-mark fn, never to wrongly mark a declaration.
+ */
+export function isDeclarationOnly(lines: string[], startIdx: number): boolean {
+	// Bound the scan; a fn signature longer than ~40 lines is exotic.
+	const limit = Math.min(lines.length, startIdx + 80);
+	for (let j = startIdx; j < limit; j += 2) {
+		const ln = lines[j];
+		// Strip a trailing `// ...` line comment so a stray `;` inside it
+		// doesn't fool us. Same for a trailing `/* ... */` if it closes on
+		// the same line.
+		const noLineComment = ln.replace(/\/\/.*$/, "");
+		const noBlockComment = noLineComment.replace(/\/\*.*?\*\//g, "");
+		// First "structural" terminator wins.
+		const semi = noBlockComment.indexOf(";");
+		const brace = noBlockComment.indexOf("{");
+		if (semi === -1 && brace === -1) continue;
+		if (semi !== -1 && (brace === -1 || semi < brace)) return true;
+		return false;
+	}
+	// Couldn't decide — assume it has a body to avoid silently dropping
+	// a real hot fn. (A worst-case false-negative will produce the original
+	// rustc error and the user can re-run with a fix.)
+	return false;
 }
 
 /**
@@ -442,7 +499,7 @@ export function renderPlanMarkdown(plan: PatchPlan): string {
 	out.push(`- Vendor root: \`${plan.vendor_root}\``);
 	out.push(`- Crates: **${plan.crates.length}**, hot fns: **${plan.crates.reduce((n, c) => n + c.hot.length, 0)}**, cold fns: **${plan.crates.reduce((n, c) => n + c.cold.length, 0)}**`);
 	out.push("");
-	out.push("> Default decision is `cold` (size) at the lib root via `#![cfg_attr(..., optimize(size))]`. Hot fns are bumped back up to speed via `#[optimize(speed)]`. Both attributes require nightly + `#![feature(optimize_attribute)]`.");
+	out.push("> Default decision is `cold` (size): each patched crate gets a `[profile.release.package.<crate>] opt-level = \"z\"` override in the same managed `[patch.crates-io]` block. Hot fns are bumped back up to speed via `#[optimize(speed)]` (nightly `optimize_attribute`). `#[optimize]` is fn-only — it cannot be applied at the crate root, so the size default has to come from Cargo, not from the lib header.");
 	out.push("");
 	for (const c of plan.crates) {
 		out.push(`## \`${c.crate}\` → \`${c.patchPath}\``);

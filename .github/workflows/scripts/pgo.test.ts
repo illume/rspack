@@ -962,12 +962,17 @@ crates: [
 { crate: "hstr", patchPath: "vendor/hstr", defaultDecision: "cold", hot: [{ symbol: "Y", fnName: "g", pct: 0.05, decision: "hot" }], cold: [] },
 ],
 };
-it("renders sentinels + entries", () => {
+it("renders sentinels + entries + per-crate profile.release.package overrides", () => {
 const t = renderCargoPatchSection(plan);
 assert.match(t, new RegExp(PATCH_BEGIN_MARKER));
 assert.match(t, new RegExp(PATCH_END_MARKER));
 assert.match(t, /\[patch\.crates-io\]/);
 assert.match(t, /swc_ecma_minifier = \{ path = "vendor\/swc_ecma_minifier" \}/);
+// Per-crate `[profile.release.package.X] opt-level = "z"` is what makes
+// the patched crates default to size; without it the lib header alone
+// has no effect (rustc rejects crate-level `#[optimize]`).
+assert.match(t, /\[profile\.release\.package\.swc_ecma_minifier\]\s*\nopt-level = "z"/);
+assert.match(t, /\[profile\.release\.package\.hstr\]\s*\nopt-level = "z"/);
 });
 it("write/remove are byte-identical for round-trip", () => {
 const before = `[workspace]\nmembers = ["a"]\n`;
@@ -1044,13 +1049,14 @@ const once = ensureLibHeader(src, "cold");
 const twice = ensureLibHeader(once, "cold");
 assert.equal(once, twice);
 assert.match(once, /#!\[feature\(optimize_attribute\)\]/);
-assert.match(once, /optimize\(size\)/);
+// `#[optimize]` is fn-only on nightly; the lib header must NOT contain
+// a crate-level `optimize(size|speed)` (rustc rejects it).
+assert.doesNotMatch(once, /#!\[cfg_attr\([^)]*optimize\(/);
 });
-it("updates the default decision in place", () => {
-const src = ensureLibHeader("//! crate\n", "cold");
-const updated = ensureLibHeader(src, "hot");
-assert.match(updated, /optimize\(speed\)/);
-assert.doesNotMatch(updated, /optimize\(size\)/);
+it("ignores defaultDecision (lib header is the same shape regardless)", () => {
+const cold = ensureLibHeader("//! crate\n", "cold");
+const hot = ensureLibHeader("//! crate\n", "hot");
+assert.equal(cold, hot);
 });
 it("strip removes only the managed header", () => {
 const src = ensureLibHeader("//! crate\n", "cold");
