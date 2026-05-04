@@ -1125,3 +1125,95 @@ binding:
    *bench* profile actually exercises (graph traversal, stats,
    napi bridge, …) — so the regressed bench cases get speed
    codegen on their hot paths without giving up the size win.
+
+### Empirical run on the actual binding (bench-shaped workspace per-fn `=speed`)
+
+This is the run produced by the recipe in the previous section,
+recorded against the project's vitest bench harness
+(`tests/bench/ts-react.bench.ts`) so the hot-fn set is the one
+the benches actually exercise — `rspack_core`'s `ModuleGraph` /
+`ChunkGraph` / `Stats` paths and the `rspack_binding_api` NAPI
+bridge — instead of the SWC-minifier shape the legacy
+`bb4b6f7e…json` profile inherited.
+
+Setup (this repo, x86\_64-linux,
+nightly-2026-04-16, full release flags
+`lto="fat" cgu=1 strip=true panic="abort" -Zbuild-std
+-Cforce-unwind-tables=no --features plugin,info-level`):
+
+| Variant | `.node` bytes | MiB | Δ size | Median runtime Δ |
+| --- | ---: | ---: | ---: | ---: |
+| baseline-v3 (`opt-level = 3`) | 53,007,144 | 50.55 | — | — |
+| **workspace-z-fns-speed-bench-shaped** | **36,813,736** | **35.11** | **−30.55%** | **+11.11%** (mean +13.17%) |
+
+The bench-shaped profile classifier surfaced **2 workspace
+crates** at `--threshold 0.95`: `rspack_binding_api` (7 fns
+marked) and `rspack_core` (31 fns marked across 19 files). Top
+hot leaves are `<JsCompilation>::modules` (0.98%),
+`<ModuleGraphConnection>::module` (0.25%), and
+`OverlayMap::get` (0.28%) — exactly the path the regressed
+benches go through. The 2 third-party crates the classifier
+also surfaced (`napi`, rust stdlib `core`) have no
+`vendor/<name>` directory in this checkout, so
+`buildPatchPlan` automatically excludes them from the
+`[patch.crates-io]` block (see "Vendor availability" below) —
+without that fix `cargo metadata` fails outright with
+`failed to read vendor/core/Cargo.toml`.
+
+Per-benchmark deltas vs `baseline-v3` (negative = candidate
+faster):
+
+| Benchmark | Baseline (ms) | Candidate (ms) | Δ |
+| --- | ---: | ---: | ---: |
+| Traverse module graph by dependencies | 0.117 | 0.161 | +37.75% |
+| Traverse module graph by connections | 0.026 | 0.029 | +13.13% |
+| Traverse compilation.modules | 0.004 | 0.004 | +11.11% |
+| stats.toJson() | 4.453 | 4.581 | +2.87% |
+| collect imported identifiers | 0.016 | 0.018 | +14.65% |
+| record module | 0.081 | 0.085 | +5.58% |
+| is css mod | 0.005 | 0.005 | +3.77% |
+| record chunk group | 0.003 | 0.003 | +7.14% |
+| external getResolve | 0.202 | 0.248 | +22.55% |
+
+Bench JSONs:
+
+- `perf_profiles/bench-fab9a720577bc4b90909dcfae1d534bdbe064aec-baseline-v3.json`
+- `perf_profiles/bench-734eaddbfec27261e0e68b9afbddb763b9708aed-workspace-z-fns-speed-bench-shaped.json`
+
+PGO profile (the one the recipe consumed):
+
+- `perf_profiles/6341b53a046ad6c1f3cd09a7dbf22bfa1af9eae6.json`
+  (10246 samples, 49 crates, recorded against the bench
+  harness with the profiling binding so symbols resolve)
+
+**Honest read.** The size win matches the
+minifier-shaped run (−30.55% vs −30.53%) — the workspace `=z`
+default is what does most of the lifting and that's identical
+between the two profiles. The runtime cost on the
+graph-traversal benches is *higher* than the minifier-shaped
+run (+11.11% median vs +5.56%) because at `--threshold 0.95`
+the bench-shaped profile is dominated by *non-Rust* leaves
+(v8 GC, serde\_json escape, NAPI shim) — only ~2.5% of
+attributable CPU lands in workspace Rust fns we can mark, and
+the long tail of `rspack_core` graph helpers (each <0.1%)
+stays at `=z`. To recover those, the next iteration needs
+either (a) a much lower `--threshold` so the per-fn set
+covers the long tail, or (b) `cargo vendor` so the third-party
+hot crates (`napi`, `serde_json`, `hashbrown`) actually get
+their per-fn `=speed` markers — both are now unblocked by the
+tooling in this PR.
+
+### Vendor availability: `[patch.crates-io]` only emits redirections that exist
+
+`buildPatchPlan` checks `<repoRoot>/<vendor_root>/<name>/Cargo.toml`
+existence for every third-party crate it would otherwise add to
+the managed `[patch.crates-io]` block. If the file isn't there
+(typical when `cargo vendor` hasn't been run), the crate is
+dropped from the plan entirely — no `[patch.crates-io] X = {
+path = "vendor/X" }` line, no `[profile.release.package.X]`
+override, and no source-rewrite walk. This avoids breaking
+`cargo metadata` with `failed to read .../vendor/X/Cargo.toml`
+on workstations that haven't run `cargo vendor` yet. Tests can
+inject a mock via `BuildPatchPlanOptions.isVendorAvailable`;
+when `repoRoot` is unset the default is "always available", so
+legacy unit-test plans built in isolation are unchanged.

@@ -119,6 +119,15 @@ export interface BuildPatchPlanOptions {
 	 * checking `<repoRoot>/crates/<name>/Cargo.toml` existence on disk.
 	 */
 	isWorkspaceMember?: (crate: string) => boolean;
+	/**
+	 * Custom vendor-availability detector for third-party crates, used to
+	 * decide whether a `[patch.crates-io] X = { path = "vendor/X" }`
+	 * redirection can be emitted safely. Defaults to checking
+	 * `<repoRoot>/<vendor_root>/<name>/Cargo.toml` existence on disk; when
+	 * `repoRoot` is unset (e.g. legacy unit tests), defaults to "always
+	 * available" to preserve back-compat.
+	 */
+	isVendorAvailable?: (crate: string) => boolean;
 }
 
 export const PATCH_PLAN_SCHEMA_VERSION = 1 as const;
@@ -229,12 +238,38 @@ export function buildPatchPlan(
 	ingest("hot", cls.hot);
 	ingest("cold", cls.cold);
 
+	// Vendor-availability detector for third-party crates: the
+	// `[patch.crates-io] X = { path = "vendor/X" }` redirection only works
+	// when `vendor/X/Cargo.toml` actually exists on disk; otherwise `cargo
+	// metadata` fails with `failed to read .../vendor/X/Cargo.toml`. Tests
+	// inject a mock via `opts.isVendorAvailable`.
+	const isVendorAvailable: (c: string) => boolean = opts.isVendorAvailable
+		?? (opts.repoRoot
+			? (c) => {
+				try {
+					return statSync(join(opts.repoRoot!, vendorRoot, c, "Cargo.toml")).isFile();
+				} catch {
+					return false;
+				}
+			}
+			// No repoRoot context (e.g. unit tests building a plan in
+			// isolation): fall back to "available" so the legacy
+			// renderCargoPatchSection output is unchanged.
+			: () => true);
+
 	// Drop crates with no hot functions — there is no point patching a crate
 	// that doesn't contain any speed-critical symbol; the package-level
 	// `[profile.release.package.X] opt-level = "z"` already covers it.
 	const crates: PatchPlanCrate[] = [];
 	for (const [name, agg] of byCrate) {
 		if (agg.hot.length === 0) continue;
+		const isWs = isWorkspaceMember(name);
+		// Drop third-party crates that aren't vendored: emitting a
+		// `[patch.crates-io] X = { path = "vendor/X" }` line for a
+		// non-existent path breaks `cargo metadata` for the entire
+		// workspace. The source rewrite would also be a no-op (the
+		// existing per-crate `skip` log covers that path).
+		if (!isWs && !isVendorAvailable(name)) continue;
 		// Stable order inside each bucket: descending by pct, then symbol.
 		const cmp = (a: PatchPlanFunction, b: PatchPlanFunction): number =>
 			b.pct - a.pct || a.symbol.localeCompare(b.symbol);
@@ -242,8 +277,8 @@ export function buildPatchPlan(
 		agg.cold.sort(cmp);
 		crates.push({
 			crate: name,
-			patchPath: isWorkspaceMember(name) ? `crates/${name}` : `${vendorRoot}/${name}`,
-			kind: isWorkspaceMember(name) ? "workspace" : "third-party",
+			patchPath: isWs ? `crates/${name}` : `${vendorRoot}/${name}`,
+			kind: isWs ? "workspace" : "third-party",
 			defaultDecision: "cold",
 			hot: agg.hot,
 			cold: agg.cold,
