@@ -92,6 +92,17 @@ export interface ApplyOpts {
 	workspaceDefault?: string;
 	alwaysHot?: string[];
 	alwaysCold?: string[];
+	/**
+	 * When true, skip writing the managed `[profile.release.package.X]`
+	 * block. Use together with `--workspace-default z` to get "shrink
+	 * everything via workspace, then surgically lift hot fns back to speed
+	 * via `pgo-run.ts patch --apply`" — i.e. the workspace knob handles
+	 * the long tail and the per-fn `#[optimize(speed)]` markers handle the
+	 * hot path. Without this, `apply` would also pin hot CRATES back to
+	 * `=3`, which is a coarser mechanism than per-fn markers and is
+	 * redundant when `patch` is going to override the same crates anyway.
+	 */
+	noPackageOverrides?: boolean;
 }
 
 function cmdApply(profileFile: string, opts: ApplyOpts = {}): { hot: number; cold: number } {
@@ -111,6 +122,12 @@ function cmdApply(profileFile: string, opts: ApplyOpts = {}): { hot: number; col
 				`  workspace [profile.release].opt-level → ${opts.workspaceDefault} (original preserved in sentinel comment)`
 			);
 		}
+	}
+	if (opts.noPackageOverrides) {
+		console.log(
+			`  --no-package-overrides: skipping managed [profile.release.package.X] block (${classification.hot.length} hot / ${classification.cold.length} cold not pinned)`
+		);
+		return { hot: classification.hot.length, cold: classification.cold.length };
 	}
 	const { changed } = applyOverridesToFile(cargoTomlPath(), classification, {
 		hotOptLevel: opts.hotOptLevel,
@@ -201,6 +218,13 @@ export function parseApplyOpts(rest: string[]): { profile: string | undefined; o
 			opts.alwaysCold = (opts.alwaysCold ?? []).concat(
 				rest[++i].split(",").map(s => s.trim()).filter(Boolean)
 			);
+		}
+		else if (a === "--no-package-overrides") {
+			// Skip the managed `[profile.release.package.X]` block so the
+			// only effect of `apply` is the workspace-level opt-level knob.
+			// Pairs with `pgo-run.ts patch --apply` to deliver per-fn speed
+			// markers instead of crate-level pin-back.
+			opts.noPackageOverrides = true;
 		}
 		else if (a === "--aggressive-size") {
 			// Convenience: workspace=z, hot=3, cold=z (cold becomes a no-op).
@@ -337,7 +361,7 @@ function usage(): never {
 		[
 			"Usage:",
 			"  pgo-run.ts profile  -- <bench-cmd> [args...]",
-			"  pgo-run.ts apply    [--profile <path>] [--threshold <0..1>] [--hot-opt-level <lvl>] [--cold-opt-level <lvl>] [--workspace-default <lvl>] [--aggressive-size] [--always-hot <crate>[,<crate>...]] [--always-cold <crate>[,<crate>...]]",
+			"  pgo-run.ts apply    [--profile <path>] [--threshold <0..1>] [--hot-opt-level <lvl>] [--cold-opt-level <lvl>] [--workspace-default <lvl>] [--aggressive-size] [--no-package-overrides] [--always-hot <crate>[,<crate>...]] [--always-cold <crate>[,<crate>...]]",
 			"  pgo-run.ts revert",
 			"  pgo-run.ts rebuild",
 			"  pgo-run.ts validate",

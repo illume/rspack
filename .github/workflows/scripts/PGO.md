@@ -287,19 +287,97 @@ node --experimental-strip-types .github/workflows/scripts/pgo-run.ts \
 0.16.1; the patch only matches `^0.16` paths, the older versions keep
 using crates.io. Same shape if you choose to vendor only some versions.)
 
+### Empirical run on the actual binding (workspace `=z` + per-fn `=speed`)
+
+Same `rspack.linux-x64-gnu.node` build as above; **only** difference is
+the workspace `[profile.release].opt-level` is flipped to `"z"` (so all
+~95 workspace + dependency crates default to size) **without** any
+`[profile.release.package.X]` pin-back. The same per-fn
+`#[optimize(speed)]` markers from the cargo-patch step are kept on the
+18 hot fns inside the 8 patched crates. This is the natural
+"size-everywhere except proven hot fns" composition.
+
+Driven by the new `apply --no-package-overrides` flag:
+
+```bash
+# Workspace knob only — no managed [profile.release.package.X] block.
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts \
+    apply --profile perf_profiles/<sha>.json \
+          --workspace-default z --no-package-overrides
+# Per-fn speed markers via cargo-patch (unchanged).
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts \
+    patch --profile perf_profiles/<sha>.json --threshold 0.5 --apply
+pnpm run build:binding:release
+node --experimental-strip-types .github/workflows/scripts/pgo-run.ts \
+    bench --label workspace-z-fns-speed
+```
+
+| Variant | `.node` bytes | MiB | Δ size | Build time | Median runtime Δ |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| baseline-v3 (`opt-level = 3`) | 53,007,144 | 50.55 | — | 17m06s | — |
+| **workspace-z-fns-speed** (workspace `=z` + 18 hot fns `=speed`) | **36,824,872** | **35.12** | **−30.53%** | **13m45s** | **+5.56%** (mean +9.60%) |
+
+For reference: `aggressive-z-95` (workspace `=z` + 18 hot **crates** at
+`=3`) produced 39.9 MiB / −24.65% size at the same +5.56% median runtime
+cost on a different SHA. The combined `workspace-z-fns-speed` mode beats
+that by ~3 MiB more savings (−30.53% vs −24.65%) at identical median
+runtime, because per-fn `#[optimize(speed)]` markers keep just the 18
+hot fn bodies at speed codegen instead of the entire 18 hot crates.
+Mean runtime is +9.60% — driven mostly by `Traverse module graph by
+dependencies` (+30.57%); the other 8 benches are within +0–16%.
+
+Per-bench deltas (negative = candidate faster):
+
+| Benchmark | Baseline-v3 (ms) | workspace-z-fns-speed (ms) | Δ |
+| --- | ---: | ---: | ---: |
+| Traverse module graph by dependencies | 0.117 | 0.153 | +30.57% |
+| Traverse module graph by connections | 0.026 | 0.029 | +11.58% |
+| Traverse compilation.modules | 0.004 | 0.004 | +5.56% |
+| stats.toJson() | 4.453 | 4.659 | +4.62% |
+| collect imported identifiers | 0.016 | 0.018 | +15.92% |
+| record module | 0.081 | 0.083 | +2.97% |
+| is css mod | 0.005 | 0.005 | +0.00% |
+| record chunk group | 0.003 | 0.003 | +10.71% |
+| external getResolve | 0.202 | 0.211 | +4.45% |
+
+**Read.** Three reference data points now exist for this binding:
+
+| Mode | Size | Median runtime | Notes |
+| --- | ---: | ---: | --- |
+| baseline (`opt-level = 3`) | 50.55 MiB | — | every crate at speed |
+| `patch-cargo-fns` (8 crates `=z`, 18 hot fns `=speed`) | 49.17 MiB (−2.73%) | −1.53% | minimal size win, slightly faster |
+| `aggressive-z-95` (workspace `=z`, 18 hot **crates** `=3`) | 38.09 MiB (−24.65%) | +5.56% | crate-level pin-back |
+| **`workspace-z-fns-speed`** (workspace `=z`, 18 hot **fns** `=speed`) | **35.12 MiB (−30.53%)** | **+5.56%** | **largest size win** |
+
+If shipping size matters more than the worst-case bench, the combined
+mode is the right knob. The runtime regression is concentrated in
+`Traverse module graph by dependencies` — adding it (or the rspack
+crates that contain its top symbols) to a future PGO profile would let
+the hot-fn marker set lift it back to speed codegen too.
+
+Bench JSON files committed:
+- `perf_profiles/bench-fab9a720577bc4b90909dcfae1d534bdbe064aec-baseline-v3.json`
+- `perf_profiles/bench-fab9a720577bc4b90909dcfae1d534bdbe064aec-workspace-z-fns-speed.json`
+
 ### What this composes with
 
 `pgo-run.ts patch` writes only the `[patch.crates-io]` section. The
-existing `pgo-run.ts apply --aggressive-size` continues to write the
+existing `pgo-run.ts apply` writes the workspace `opt-level` knob and
+(unless `--no-package-overrides` is passed) the
 `[profile.release.package.X]` overrides — they don't conflict (Cargo
-applies both). A practical full pipeline:
+applies both). Three sensible compositions:
 
-1. `apply --aggressive-size` → workspace defaults to `=z`, hot crates get
-   pinned to `=3` at the package level. This handles the *tail* of cold
-   crates that don't appear in `top_symbols` at all.
-2. `patch --apply` → for the 8 hot crates that *do* have top symbols,
-   replace the package-level `=3` knob with the much finer source-level
-   markers, so cold helpers inside those crates also shrink.
+1. **`apply --aggressive-size`** alone → workspace `=z`, hot crates
+   pinned to `=3`. Best when you don't want to vendor anything;
+   coarsest knob.
+2. **`patch --apply`** alone → 8 patched crates default to `=z` with
+   per-fn `=speed`, workspace stays at `=3`. Smallest tooling
+   footprint; smallest size win.
+3. **`apply --workspace-default z --no-package-overrides`** + **`patch
+   --apply`** → workspace `=z` everywhere (long tail), 18 hot fns at
+   `=speed` (hot path). Biggest size win.
+
+Mode 3 is what the empirical bench above measures.
 
 ### Caveats (kept honest)
 
