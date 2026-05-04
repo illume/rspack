@@ -1203,6 +1203,98 @@ hot crates (`napi`, `serde_json`, `hashbrown`) actually get
 their per-fn `=speed` markers — both are now unblocked by the
 tooling in this PR.
 
+### Empirical run on the actual binding (selective vendor + per-fn `=speed`)
+
+Same recipe as the previous section, but this time using the
+new `pgo-run.ts vendor` subcommand so the third-party hot
+crates the bench-shaped profile flags actually land in
+`vendor/<name>/` and pick up their per-fn `=speed` markers,
+instead of being silently excluded by the
+"Vendor availability" filter.
+
+Setup (this repo, x86\_64-linux,
+nightly-2026-04-16, full release flags
+`lto="fat" cgu=1 strip=true panic="abort" -Zbuild-std
+-Cforce-unwind-tables=no --features plugin,info-level`):
+
+```bash
+# 1) Selectively download the third-party hot crates from crates.io.
+tsx .github/workflows/scripts/pgo-run.ts vendor \
+    --profile perf_profiles/6341b53a046ad6c1f3cd09a7dbf22bfa1af9eae6.json \
+    --threshold 0.95
+# → vendored napi@3.8.5 → vendor/napi
+#   skip rspack_binding_api: workspace member (no vendoring needed)
+#   skip rspack_core: workspace member (no vendoring needed)
+#   skip core: no unique version found in Cargo.lock (Rust stdlib)
+
+# 2) Workspace-default = "z", no per-package overrides.
+tsx .github/workflows/scripts/pgo-run.ts apply \
+    --profile perf_profiles/6341b53a046ad6c1f3cd09a7dbf22bfa1af9eae6.json \
+    --workspace-default z --no-package-overrides
+
+# 3) [patch.crates-io] napi → vendor/napi + per-fn markers.
+tsx .github/workflows/scripts/pgo-run.ts patch \
+    --profile perf_profiles/6341b53a046ad6c1f3cd09a7dbf22bfa1af9eae6.json \
+    --threshold 0.95 --apply
+# → 1 third-party crate(s) + 2 workspace crate(s), 4 hot fn(s)
+#   updated Cargo.toml [patch.crates-io] managed block
+#   [workspace] rspack_binding_api: 7 edit(s) across 7 file(s)
+#   [workspace] rspack_core:        31 edit(s) across 19 file(s)
+#   napi:                           31 edit(s) across 25 file(s)
+
+# 4) Build + bench.
+pnpm run build:binding:release   # 13m43s on a 4-core CI runner
+tsx .github/workflows/scripts/pgo-run.ts bench --label workspace-z-fns-speed-vendored
+```
+
+| Variant | `.node` bytes | MiB | Δ size | Median runtime Δ |
+| --- | ---: | ---: | ---: | ---: |
+| baseline-vendored-recipe (`opt-level = 3`) | 53,007,144 | 50.55 | — | — |
+| **workspace-z-fns-speed-vendored** | **36,814,632** | **35.11** | **−30.55%** | **+13.28%** (mean +12.13%) |
+
+Per-benchmark deltas (negative = candidate faster):
+
+| Benchmark | Baseline (ms) | Candidate (ms) | Δ |
+| --- | ---: | ---: | ---: |
+| Traverse module graph by dependencies | 0.138 | 0.167 | +21.42% |
+| Traverse module graph by connections | 0.027 | 0.031 | +15.30% |
+| Traverse compilation.modules | 0.004 | 0.004 | +7.89% |
+| stats.toJson() | 4.682 | 5.278 | +12.74% |
+| collect imported identifiers | 0.017 | 0.019 | +14.29% |
+| record module | 0.088 | 0.085 | −3.52% |
+| is css mod | 0.005 | 0.006 | +9.26% |
+| record chunk group | 0.003 | 0.003 | +18.52% |
+| external getResolve | 0.236 | 0.267 | +13.28% |
+
+Bench JSONs:
+
+- `perf_profiles/bench-f185ae6d9abcb102f03ae5aee5ac005fc8695df0-baseline-vendored-recipe.json`
+- `perf_profiles/bench-f185ae6d9abcb102f03ae5aee5ac005fc8695df0-workspace-z-fns-speed-vendored.json`
+
+**Honest read.** Plumbing the third-party hot crate through
+the new selective-vendor path produces the **same size win**
+(−30.55%) as the previous `workspace-z-fns-speed-bench-shaped`
+run that excluded `napi` from the patch plan. That makes
+sense: the workspace `[profile.release].opt-level = "z"`
+already applies to every dependency that doesn't have a
+per-package override, so vendoring `napi` and adding
+`[profile.release.package.napi] opt-level = "z"` is a no-op
+for codegen — the only new effect is the 31 per-fn
+`#[optimize(speed)]` markers in `vendor/napi/src/**.rs`. The
+top napi hot leaf the bench-shaped profile surfaces is
+`<CallbackInfo<1>>::new` at 0.20% of attributable samples —
+well inside benchmark noise on a 4-core CI runner, which is
+why the runtime delta vs the no-vendor variant
+(+13.28% vs +11.11% median) lies within the cross-run
+variance previously observed (+5.56% .. +13.17% mean across
+three earlier runs of essentially the same recipe). The
+selective-vendor tooling is now end-to-end reproducible —
+landing per-fn markers on third-party hot crates is unblocked,
+and the next iteration can lower `--threshold` to put more of
+the long tail (and more hot fns inside `napi`) into the
+`#[optimize(speed)]` set without paying for a full
+`cargo vendor`.
+
 ### Vendor availability: `[patch.crates-io]` only emits redirections that exist
 
 `buildPatchPlan` checks `<repoRoot>/<vendor_root>/<name>/Cargo.toml`
