@@ -1,0 +1,368 @@
+name: Binary Size Experiment
+
+# Builds the Rspack `.node` NAPI binding under several different binary-size
+# optimization variants on Linux, macOS and Windows runners, then aggregates
+# the resulting `.node` sizes into a single markdown summary table plus a
+# downloadable artifact for offline analysis.
+#
+# All scripting is plain TypeScript executed by Node ≥ 22.6 with native type
+# stripping (no compile / bundle / install step). The `test` job runs on
+# every platform first and gates the experiment matrix — if the helpers
+# don't pass their unit tests, no expensive build job runs.
+#
+# Triggers:
+#   - Manual (workflow_dispatch).
+#   - On PRs that touch the experiment files themselves, so changes to the
+#     scripts or workflow get exercised end-to-end before merging. We
+#     deliberately do not run on every push to main, since each full matrix
+#     row is an expensive release build.
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_macos:
+        description: 'Also build the baseline + opt-level=s variants on macOS arm64'
+        type: boolean
+        default: true
+      run_windows:
+        description: 'Also build the baseline + opt-level=s variants on Windows x64'
+        type: boolean
+        default: true
+      run_experiments:
+        description: 'Run the experiment matrix (set false to test the helpers only)'
+        type: boolean
+        default: true
+  pull_request:
+    paths:
+      - '.github/workflows/binary-size-experiment.yml'
+      - '.github/workflows/scripts/**'
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Helper unit tests. Cheap (only a Node install + node:test). One job per
+  # supported runner OS so that platform-specific paths in the helpers
+  # (filesystem casing, `strip` invocation, path separators, CRLF line
+  # endings on Windows checkout) are exercised independently.
+  #
+  # The three jobs are intentionally NOT a single matrix: each experiment
+  # platform `needs:` only its own test job, so a Windows-only test failure
+  # does not block the Linux experiment matrix from running, and vice versa.
+  # -------------------------------------------------------------------------
+  test_linux:
+    name: 'test: ubuntu-latest'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Use Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run helper unit tests
+        run: |
+          node --version
+          node --experimental-strip-types --test \
+            .github/workflows/scripts/binary-size-experiment.test.ts
+
+  test_macos:
+    name: 'test: macos-14'
+    runs-on: macos-14
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Use Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run helper unit tests
+        run: |
+          node --version
+          node --experimental-strip-types --test \
+            .github/workflows/scripts/binary-size-experiment.test.ts
+
+  test_windows:
+    name: 'test: windows-latest'
+    runs-on: windows-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Use Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run helper unit tests
+        run: |
+          node --version
+          node --experimental-strip-types --test \
+            .github/workflows/scripts/binary-size-experiment.test.ts
+
+  # -------------------------------------------------------------------------
+  # Linux: full matrix across every variant.
+  # -------------------------------------------------------------------------
+  linux:
+    name: 'linux: ${{ matrix.variant }}'
+    needs: [test_linux]
+    if: ${{ inputs.run_experiments != false && (github.event_name != 'pull_request') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          # Reference: shipped configuration. Anything we report is delta vs. this.
+          - baseline
+          # Force every release crate to opt-level="s" instead of "3".
+          - opt-level-s-global
+          # Even more aggressive size-only setting, opt-level="z".
+          - opt-level-z-global
+          # Drop fat LTO down to thin. Cheaper to build, usually a bit larger.
+          - lto-thin
+          # Disable LTO entirely. Fastest build; biggest output. Reference point.
+          - lto-off
+          # Reverse-test: drop `-Zbuild-std=panic_abort,std`. Shows how much that
+          # rebuild-of-std currently saves us by stripping unused std code.
+          - no-build-std
+          # Reverse-test: drop the `info-level` feature flag. Currently this
+          # asks `tracing` to drop debug/trace level codegen entirely - removing
+          # it shows what those tracing levels would cost.
+          - no-info-level
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Free disk
+        uses: xc2/free-disk-space@fbe203b3788f2bebe2c835a15925da303eaa5efe # v1.0.0
+        with:
+          tool-cache: false
+
+      - name: Apply variant patch
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: node --experimental-strip-types .github/workflows/scripts/binary-size-apply-variant.ts
+
+      - name: Pnpm Setup
+        timeout-minutes: 5
+        uses: ./.github/actions/pnpm/setup
+
+      - name: Install Binding Dependencies
+        run: |
+          cd ./crates/node_binding
+          pnpm i --ignore-workspace --no-lockfile
+
+      - name: Install Rust Toolchain
+        uses: ./.github/actions/rustup
+        with:
+          key: linux-size-experiment-${{ matrix.variant }}
+          save-if: false
+
+      - name: Setup Rust Target
+        run: rustup target add x86_64-unknown-linux-gnu
+
+      - name: Cargo codegen
+        run: cargo codegen
+
+      - name: Build binding (release)
+        run: RUST_TARGET=x86_64-unknown-linux-gnu USE_NAPI_CROSS=1 pnpm build:binding:release
+        env:
+          TARGET_CC: clang
+
+      - name: Measure
+        run: node --experimental-strip-types .github/workflows/scripts/binary-size-measure.ts
+        env:
+          VARIANT: ${{ matrix.variant }}
+          PLATFORM: linux-x64-gnu
+
+      - name: Upload size report
+        uses: ./.github/actions/artifact/upload
+        with:
+          name: size-report-linux-${{ matrix.variant }}
+          path: size-report.json
+
+  # -------------------------------------------------------------------------
+  # macOS arm64: only baseline + the most likely actionable variant.
+  # -------------------------------------------------------------------------
+  macos:
+    name: 'macos: ${{ matrix.variant }}'
+    needs: [test_macos]
+    if: ${{ inputs.run_experiments != false && inputs.run_macos != false && (github.event_name != 'pull_request') }}
+    runs-on: macos-14
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - baseline
+          - opt-level-s-global
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Apply variant patch
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: node --experimental-strip-types .github/workflows/scripts/binary-size-apply-variant.ts
+
+      - name: Pnpm Setup
+        timeout-minutes: 5
+        uses: ./.github/actions/pnpm/setup
+
+      - name: Install Binding Dependencies
+        run: |
+          cd ./crates/node_binding
+          pnpm i --ignore-workspace --no-lockfile
+
+      - name: Install Rust Toolchain
+        uses: ./.github/actions/rustup
+        with:
+          key: macos-size-experiment-${{ matrix.variant }}
+          save-if: false
+
+      - name: Setup Rust Target
+        run: rustup target add aarch64-apple-darwin
+
+      - name: Cargo codegen
+        run: cargo codegen
+
+      - name: Build binding (release)
+        run: |
+          export CC=$(xcrun -f clang)
+          export CXX=$(xcrun -f clang++)
+          SYSROOT=$(xcrun --sdk macosx --show-sdk-path)
+          export CFLAGS="-isysroot $SYSROOT -isystem $SYSROOT"
+          RUST_TARGET=aarch64-apple-darwin pnpm build:binding:release
+
+      - name: Measure
+        run: node --experimental-strip-types .github/workflows/scripts/binary-size-measure.ts
+        env:
+          VARIANT: ${{ matrix.variant }}
+          PLATFORM: darwin-arm64
+
+      - name: Upload size report
+        uses: ./.github/actions/artifact/upload
+        with:
+          name: size-report-macos-${{ matrix.variant }}
+          path: size-report.json
+
+  # -------------------------------------------------------------------------
+  # Windows x64: only baseline + opt-level=s.
+  # -------------------------------------------------------------------------
+  windows:
+    name: 'windows: ${{ matrix.variant }}'
+    needs: [test_windows]
+    if: ${{ inputs.run_experiments != false && inputs.run_windows != false && (github.event_name != 'pull_request') }}
+    runs-on: windows-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - baseline
+          - opt-level-s-global
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Apply variant patch
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: node --experimental-strip-types .github/workflows/scripts/binary-size-apply-variant.ts
+
+      - name: Pnpm Setup
+        timeout-minutes: 5
+        uses: ./.github/actions/pnpm/setup
+
+      - name: Install Binding Dependencies
+        run: |
+          cd ./crates/node_binding
+          pnpm i --ignore-workspace --no-lockfile
+
+      - name: Install Rust Toolchain
+        uses: ./.github/actions/rustup
+        with:
+          key: windows-size-experiment-${{ matrix.variant }}
+          save-if: false
+
+      - name: Setup Rust Target
+        run: rustup target add x86_64-pc-windows-msvc
+
+      - name: Cargo codegen
+        run: cargo codegen
+
+      - name: Build binding (release)
+        run: RUST_TARGET=x86_64-pc-windows-msvc pnpm build:binding:release
+
+      - name: Measure
+        run: node --experimental-strip-types .github/workflows/scripts/binary-size-measure.ts
+        env:
+          VARIANT: ${{ matrix.variant }}
+          PLATFORM: win32-x64-msvc
+
+      - name: Upload size report
+        uses: ./.github/actions/artifact/upload
+        with:
+          name: size-report-windows-${{ matrix.variant }}
+          path: size-report.json
+
+  # -------------------------------------------------------------------------
+  # Aggregator: download every size-report-* artifact and render a single
+  # markdown summary table plus a combined JSON document. The combined JSON
+  # is uploaded under a single artifact name so a future analysis session
+  # can grab one file rather than re-merging per-job outputs.
+  # -------------------------------------------------------------------------
+  summary:
+    name: Aggregate results
+    needs: [linux, macos, windows]
+    if: ${{ always() && (needs.linux.result != 'skipped' || needs.macos.result != 'skipped' || needs.windows.result != 'skipped') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Use Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Download all size reports
+        uses: actions/download-artifact@v4
+        with:
+          path: reports
+          pattern: size-report-*
+
+      - name: Render summary
+        run: |
+          node --experimental-strip-types \
+            .github/workflows/scripts/binary-size-summarize.ts reports \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload combined results for offline analysis
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-size-experiment-results
+          path: |
+            combined-size-reports.json
+            reports/**
+          if-no-files-found: warn

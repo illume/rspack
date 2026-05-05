@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "gitSha": "a70f60a8ef14d63d6fe2f2c5bd045c6e5fb965dd",
+  "label": "patch-cargo-fns",
+  "timestamp": "2026-05-04T05:29:45.648Z",
+  "samples": [
+    {
+      "name": "js@Traverse module graph by dependencies",
+      "meanMs": 0.1115,
+      "hz": 8967.33,
+      "stdDevMs": null,
+      "samples": 4484
+    },
+    {
+      "name": "js@Traverse module graph by connections",
+      "meanMs": 0.021,
+      "hz": 47657.92,
+      "stdDevMs": null,
+      "samples": 23829
+    },
+    {
+      "name": "js@Traverse compilation.modules",
+      "meanMs": 0.0029,
+      "hz": 339776.5,
+      "stdDevMs": null,
+      "samples": 169889
+    },
+    {
+      "name": "js@stats.toJson()",
+      "meanMs": 3.4628,
+      "hz": 288.78,
+      "stdDevMs": null,
+      "samples": 145
+    },
+    {
+      "name": "js@collect imported identifiers",
+      "meanMs": 0.0129,
+      "hz": 77339.7,
+      "stdDevMs": null,
+      "samples": 38670
+    },
+    {
+      "name": "js@record module",
+      "meanMs": 0.0683,
+      "hz": 14631.9,
+      "stdDevMs": null,
+      "samples": 7316
+    },
+    {
+      "name": "js@is css mod",
+      "meanMs": 0.0041,
+      "hz": 243910.76,
+      "stdDevMs": null,
+      "samples": 121956
+    },
+    {
+      "name": "js@record chunk group",
+      "meanMs": 0.0023,
+      "hz": 439718.83,
+      "stdDevMs": null,
+      "samples": 219860
+    },
+    {
+      "name": "js@external getResolve",
+      "meanMs": 0.1558,
+      "hz": 6419.04,
+      "stdDevMs": null,
+      "samples": 3210
+    }
+  ]
+}

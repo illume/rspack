@@ -1,0 +1,757 @@
+{
+  "schema_version": 1,
+  "git_sha": "6341b53a046ad6c1f3cd09a7dbf22bfa1af9eae6",
+  "created_at": "2026-05-04T11:11:10.278Z",
+  "rustc_version": "rustc 1.97.0-nightly (e8e4541ff 2026-04-15)",
+  "command": "pnpm --filter bench run bench",
+  "total_samples": 10246,
+  "by_crate": [
+    {
+      "crate": "<unknown>",
+      "samples": 4446,
+      "pct": 0.4339254343158306
+    },
+    {
+      "crate": "v8",
+      "samples": 3735,
+      "pct": 0.3645325004879953
+    },
+    {
+      "crate": "std",
+      "samples": 407,
+      "pct": 0.03972281866094086
+    },
+    {
+      "crate": "rspack_binding_api",
+      "samples": 286,
+      "pct": 0.027913332032012492
+    },
+    {
+      "crate": "napi",
+      "samples": 186,
+      "pct": 0.01815342572711302
+    },
+    {
+      "crate": "serde_json",
+      "samples": 166,
+      "pct": 0.016201444466133124
+    },
+    {
+      "crate": "heap",
+      "samples": 146,
+      "pct": 0.01424946320515323
+    },
+    {
+      "crate": "core",
+      "samples": 97,
+      "pct": 0.009467109115752489
+    },
+    {
+      "crate": "rspack_core",
+      "samples": 91,
+      "pct": 0.00888151473745852
+    },
+    {
+      "crate": "v8impl",
+      "samples": 89,
+      "pct": 0.008686316611360531
+    },
+    {
+      "crate": "hashbrown",
+      "samples": 75,
+      "pct": 0.007319929728674604
+    },
+    {
+      "crate": "rspack_resolver",
+      "samples": 72,
+      "pct": 0.007027132539527621
+    },
+    {
+      "crate": "alloc",
+      "samples": 66,
+      "pct": 0.006441538161233652
+    },
+    {
+      "crate": "node",
+      "samples": 56,
+      "pct": 0.0054655475307437045
+    },
+    {
+      "crate": "swc_ecma_ast",
+      "samples": 52,
+      "pct": 0.005075151278547726
+    },
+    {
+      "crate": "node_napi_env__",
+      "samples": 47,
+      "pct": 0.0045871559633027525
+    },
+    {
+      "crate": "indexmap",
+      "samples": 36,
+      "pct": 0.0035135662697638103
+    },
+    {
+      "crate": "swc_ecma_minifier",
+      "samples": 35,
+      "pct": 0.0034159672067148156
+    },
+    {
+      "crate": "tokio",
+      "samples": 25,
+      "pct": 0.002439976576224868
+    },
+    {
+      "crate": "swc_ecma_parser",
+      "samples": 22,
+      "pct": 0.002147179387077884
+    },
+    {
+      "crate": "rspack_plugin_javascript",
+      "samples": 21,
+      "pct": 0.0020495803240288893
+    },
+    {
+      "crate": "swc_ecma_utils",
+      "samples": 10,
+      "pct": 0.0009759906304899473
+    },
+    {
+      "crate": "dashmap",
+      "samples": 10,
+      "pct": 0.0009759906304899473
+    },
+    {
+      "crate": "detail",
+      "samples": 9,
+      "pct": 0.0008783915674409526
+    },
+    {
+      "crate": "sugar_path",
+      "samples": 9,
+      "pct": 0.0008783915674409526
+    },
+    {
+      "crate": "swc_ecma_transforms_base",
+      "samples": 7,
+      "pct": 0.0006831934413429631
+    },
+    {
+      "crate": "memchr",
+      "samples": 7,
+      "pct": 0.0006831934413429631
+    },
+    {
+      "crate": "rayon_core",
+      "samples": 6,
+      "pct": 0.0005855943782939684
+    },
+    {
+      "crate": "swc_ecma_codegen",
+      "samples": 3,
+      "pct": 0.0002927971891469842
+    },
+    {
+      "crate": "crossbeam_deque",
+      "samples": 3,
+      "pct": 0.0002927971891469842
+    },
+    {
+      "crate": "icu_78",
+      "samples": 2,
+      "pct": 0.00019519812609798947
+    },
+    {
+      "crate": "absl",
+      "samples": 2,
+      "pct": 0.00019519812609798947
+    },
+    {
+      "crate": "siphasher",
+      "samples": 2,
+      "pct": 0.00019519812609798947
+    },
+    {
+      "crate": "swc_ecma_transforms_optimization",
+      "samples": 2,
+      "pct": 0.00019519812609798947
+    },
+    {
+      "crate": "hstr",
+      "samples": 2,
+      "pct": 0.00019519812609798947
+    },
+    {
+      "crate": "swc_common",
+      "samples": 2,
+      "pct": 0.00019519812609798947
+    },
+    {
+      "crate": "rayon",
+      "samples": 2,
+      "pct": 0.00019519812609798947
+    },
+    {
+      "crate": "ada",
+      "samples": 1,
+      "pct": 0.00009759906304899473
+    },
+    {
+      "crate": "simdutf",
+      "samples": 1,
+      "pct": 0.00009759906304899473
+    },
+    {
+      "crate": "swc_ecma_compat_es2022",
+      "samples": 1,
+      "pct": 0.00009759906304899473
+    },
+    {
+      "crate": "rspack_loader_runner",
+      "samples": 1,
+      "pct": 0.00009759906304899473
+    },
+    {
+      "crate": "swc_ecma_transformer",
+      "samples": 1,
+      "pct": 0.00009759906304899473
+    },
+    {
+      "crate": "aho_corasick",
+      "samples": 1,
+      "pct": 0.00009759906304899473
+    },
+    {
+      "crate": "swc_atoms",
+      "samples": 1,
+      "pct": 0.00009759906304899473
+    },
+    {
+      "crate": "scoped_tls",
+      "samples": 1,
+      "pct": 0.00009759906304899473
+    },
+    {
+      "crate": "rspack_location",
+      "samples": 1,
+      "pct": 0.00009759906304899473
+    },
+    {
+      "crate": "rspack_util",
+      "samples": 1,
+      "pct": 0.00009759906304899473
+    },
+    {
+      "crate": "cppgc",
+      "samples": 1,
+      "pct": 0.00009759906304899473
+    },
+    {
+      "crate": "parking_lot",
+      "samples": 1,
+      "pct": 0.00009759906304899473
+    }
+  ],
+  "top_symbols": [
+    {
+      "symbol": "[unknown]",
+      "crate": null,
+      "samples": 1974
+    },
+    {
+      "symbol": "<std::thread::local::LocalKey<core::cell::RefCell<std::collections::hash::map::HashMap<rspack_core::compiler::CompilerId, std::collections::hash::map::HashMap<rspack_collections::identifier::Identifier, napi::bindgen_runtime::js_values::either::Either5<rspack_napi::js_values::one_shot_instance_ref::OneShotInstanceRef<rspack_binding_api::modules::normal_module::NormalModule>, rspack_napi::js_values::one_shot_instance_ref::OneShotInstanceRef<rspack_binding_api::modules::concatenated_module::ConcatenatedModule>, rspack_napi::js_values::one_shot_instance_ref::OneShotInstanceRef<rspack_binding_api::modules::context_module::ContextModule>, rspack_napi::js_values::one_shot_instance_ref::OneShotInstanceRef<rspack_binding_api::modules::external_module::ExternalModule>, rspack_napi::js_values::one_shot_instance_ref::OneShotInstanceRef<rspack_binding_api::module::Module>>, core::hash::BuildHasherDefault<ustr_fxhash::hash::IdentityHasher>>, rustc_hash::FxBuildHasher>>>>::with::<<rspack_binding_api::module::ModuleObject as napi::bindgen_runtime::js_values::ToNapiValue>::to_napi_value::{closure#0}, core::result::Result<*mut napi_sys::types::napi_value__, napi::error::Error>>",
+      "crate": "std",
+      "samples": 179
+    },
+    {
+      "symbol": "Builtins_LoadIC",
+      "crate": null,
+      "samples": 175
+    },
+    {
+      "symbol": "heap::base::SlotCallbackResult v8::internal::Scavenger::ScavengeObject<v8::internal::FullHeapObjectSlot>(v8::internal::FullHeapObjectSlot, v8::internal::Tagged<v8::internal::HeapObject>)",
+      "crate": "heap",
+      "samples": 140
+    },
+    {
+      "symbol": "v8::internal::String::ComputeAndSetRawHash(v8::internal::SharedStringAccessGuardIfNeeded const&)",
+      "crate": "v8",
+      "samples": 132
+    },
+    {
+      "symbol": "serde_json::ser::format_escaped_str_contents::<&mut alloc::vec::Vec<u8>, serde_json::ser::CompactFormatter>",
+      "crate": "serde_json",
+      "samples": 112
+    },
+    {
+      "symbol": "v8::internal::Scanner::Next()",
+      "crate": "v8",
+      "samples": 101
+    },
+    {
+      "symbol": "<rspack_binding_api::compilation::JsCompilation>::modules",
+      "crate": "rspack_binding_api",
+      "samples": 100
+    },
+    {
+      "symbol": "v8::internal::LookupIterator::State v8::internal::LookupIterator::LookupInRegularHolder<false>(v8::internal::Tagged<v8::internal::Map>, v8::internal::Tagged<v8::internal::JSReceiver>)",
+      "crate": "v8",
+      "samples": 99
+    },
+    {
+      "symbol": "_mi_page_malloc_zero",
+      "crate": null,
+      "samples": 99
+    },
+    {
+      "symbol": "v8::internal::LookupIterator::State v8::internal::LookupIterator::LookupInRegularHolder<true>(v8::internal::Tagged<v8::internal::Map>, v8::internal::Tagged<v8::internal::JSReceiver>)",
+      "crate": "v8",
+      "samples": 81
+    },
+    {
+      "symbol": "napi_get_reference_value",
+      "crate": null,
+      "samples": 75
+    },
+    {
+      "symbol": "v8::internal::JSObject::AddDataElement(v8::internal::Handle<v8::internal::JSObject>, unsigned int, v8::internal::Handle<v8::internal::Object>, v8::internal::PropertyAttributes)",
+      "crate": "v8",
+      "samples": 75
+    },
+    {
+      "symbol": "<std::thread::local::LocalKey<core::cell::RefCell<std::collections::hash::map::HashMap<rspack_core::compilation::CompilationId, std::collections::hash::map::HashMap<rspack_core::dependency::dependency_id::DependencyId, rspack_napi::js_values::one_shot_instance_ref::OneShotInstanceRef<rspack_binding_api::dependency::Dependency>, rustc_hash::FxBuildHasher>, rustc_hash::FxBuildHasher>>>>::with::<<rspack_binding_api::dependency::DependencyWrapper as napi::bindgen_runtime::js_values::ToNapiValue>::to_napi_value::{closure#0}, core::result::Result<*mut napi_sys::types::napi_value__, napi::error::Error>>",
+      "crate": "std",
+      "samples": 60
+    },
+    {
+      "symbol": "v8::internal::Object::AddDataProperty(v8::internal::LookupIterator*, v8::internal::Handle<v8::internal::Object>, v8::internal::PropertyAttributes, v8::Maybe<v8::internal::ShouldThrow>, v8::internal::StoreOrigin, v8::internal::EnforceDefineSemantics)",
+      "crate": "v8",
+      "samples": 60
+    },
+    {
+      "symbol": "v8::internal::ConcurrentMarking::RunMajor(v8::JobDelegate*, v8::base::EnumSet<v8::internal::CodeFlushMode, int>, unsigned int, bool)",
+      "crate": "v8",
+      "samples": 57
+    },
+    {
+      "symbol": "v8impl::(anonymous namespace)::FunctionCallbackWrapper::Invoke(v8::FunctionCallbackInfo<v8::Value> const&)",
+      "crate": "v8impl",
+      "samples": 56
+    },
+    {
+      "symbol": "napi_unwrap",
+      "crate": null,
+      "samples": 56
+    },
+    {
+      "symbol": "Builtins_SetPrototypeAdd",
+      "crate": null,
+      "samples": 55
+    },
+    {
+      "symbol": "mi_free",
+      "crate": null,
+      "samples": 55
+    },
+    {
+      "symbol": "<hashbrown::map::HashMap<*mut core::ffi::c_void,",
+      "crate": "hashbrown",
+      "samples": 54
+    },
+    {
+      "symbol": "v8::internal::compiler::GraphReducer::ReduceTop()",
+      "crate": "v8",
+      "samples": 53
+    },
+    {
+      "symbol": "v8::Context::GetNumberOfEmbedderDataFields()",
+      "crate": "v8",
+      "samples": 53
+    },
+    {
+      "symbol": "Builtins_StringAdd_CheckNone",
+      "crate": null,
+      "samples": 51
+    },
+    {
+      "symbol": "void v8::internal::LookupIterator::Start<false>()",
+      "crate": null,
+      "samples": 49
+    },
+    {
+      "symbol": "unsigned short const* std::find_if<unsigned short const*, v8::internal::Utf16CharacterStream::AdvanceUntil<v8::internal::Scanner::ScanIdentifierOrKeywordInner()::{lambda(unsigned int)#1}>(v8::internal::Scanner::ScanIdentifierOrKeywordInner()::{lambda(unsigned int)#1})::{lambda(unsigned short)#1}>(unsigned short const*, unsigned short const*, v8::internal::Utf16CharacterStream::AdvanceUntil<v8::internal::Scanner::ScanIdentifierOrKeywordInner()::{lambda(unsigned int)#1}>(v8::internal::Scanner::ScanIdentifierOrKeywordInner()::{lambda(unsigned int)#1})::{lambda(unsigned short)#1})",
+      "crate": null,
+      "samples": 47
+    },
+    {
+      "symbol": "v8::internal::PropertyKey::PropertyKey(v8::internal::Isolate*, v8::internal::Handle<v8::internal::Object>, bool*)",
+      "crate": "v8",
+      "samples": 46
+    },
+    {
+      "symbol": "v8::internal::Runtime::GetObjectProperty(v8::internal::Isolate*, v8::internal::Handle<v8::internal::Object>, v8::internal::Handle<v8::internal::Object>, v8::internal::Handle<v8::internal::Object>, bool*)",
+      "crate": "v8",
+      "samples": 46
+    },
+    {
+      "symbol": "v8::Object::Set(v8::Local<v8::Context>, unsigned int, v8::Local<v8::Value>)",
+      "crate": "v8",
+      "samples": 46
+    },
+    {
+      "symbol": "<std::thread::local::LocalKey<core::cell::RefCell<std::collections::hash::map::HashMap<rspack_core::compilation::CompilationId, std::collections::hash::map::HashMap<rspack_core::dependency::dependency_id::DependencyId, rspack_napi::js_values::one_shot_value_ref::OneShotRef, rustc_hash::FxBuildHasher>, rustc_hash::FxBuildHasher>>>>::with::<<rspack_binding_api::module_graph_connection::ModuleGraphConnectionWrapper as napi::bindgen_runtime::js_values::ToNapiValue>::to_napi_value::{closure#0}, core::result::Result<*mut napi_sys::types::napi_value__, napi::error::Error>>",
+      "crate": "std",
+      "samples": 46
+    },
+    {
+      "symbol": "<core::option::Option<rspack_binding_api::module::ModuleObject> as napi::bindgen_runtime::js_values::ToNapiValue>::to_napi_value",
+      "crate": "core",
+      "samples": 45
+    },
+    {
+      "symbol": "v8::internal::Object::GetProperty(v8::internal::LookupIterator*, bool)",
+      "crate": "v8",
+      "samples": 44
+    },
+    {
+      "symbol": "void v8::internal::LookupIterator::Start<true>()",
+      "crate": null,
+      "samples": 44
+    },
+    {
+      "symbol": "node_napi_env__::can_call_into_js() const",
+      "crate": "node_napi_env__",
+      "samples": 44
+    },
+    {
+      "symbol": "v8::internal::Factory::AllocateRaw(int, v8::internal::AllocationType, v8::internal::AllocationAlignment)",
+      "crate": "v8",
+      "samples": 43
+    },
+    {
+      "symbol": "void v8::internal::MarkingVisitorBase<v8::internal::ConcurrentMarkingVisitor>::ProcessStrongHeapObject<v8::internal::FullHeapObjectSlot>(v8::internal::Tagged<v8::internal::HeapObject>, v8::internal::FullHeapObjectSlot, v8::internal::Tagged<v8::internal::HeapObject>)",
+      "crate": null,
+      "samples": 43
+    },
+    {
+      "symbol": "v8::internal::Scavenger::Process(v8::JobDelegate*)",
+      "crate": "v8",
+      "samples": 42
+    },
+    {
+      "symbol": "v8::internal::(anonymous namespace)::ElementsAccessorBase<v8::internal::(anonymous namespace)::FastHoleyNonextensibleObjectElementsAccessor, v8::internal::(anonymous namespace)::ElementsKindTraits<(v8::internal::ElementsKind)7> >::GetEntryForIndex(v8::internal::Isolate*, v8::internal::Tagged<v8::internal::JSObject>, v8::internal::Tagged<v8::internal::FixedArrayBase>, unsigned long)",
+      "crate": "v8",
+      "samples": 42
+    },
+    {
+      "symbol": "malloc",
+      "crate": null,
+      "samples": 40
+    },
+    {
+      "symbol": "Builtins_RecordWriteSaveFP",
+      "crate": null,
+      "samples": 38
+    },
+    {
+      "symbol": "v8::Value::IsExternal() const",
+      "crate": "v8",
+      "samples": 38
+    },
+    {
+      "symbol": "napi_set_element",
+      "crate": null,
+      "samples": 38
+    },
+    {
+      "symbol": "v8::internal::(anonymous namespace)::Invoke(v8::internal::Isolate*, v8::internal::(anonymous namespace)::InvokeParams const&)",
+      "crate": "v8",
+      "samples": 37
+    },
+    {
+      "symbol": "v8::Object::GetPrivate(v8::Local<v8::Context>, v8::Local<v8::Private>)",
+      "crate": "v8",
+      "samples": 37
+    },
+    {
+      "symbol": "v8::internal::JSObject::FastPropertyAt(v8::internal::Isolate*, v8::internal::Handle<v8::internal::JSObject>, v8::internal::Representation, v8::internal::FieldIndex)",
+      "crate": "v8",
+      "samples": 36
+    },
+    {
+      "symbol": "v8::TryCatch::HasCaught() const",
+      "crate": "v8",
+      "samples": 36
+    },
+    {
+      "symbol": "mi_theap_malloc_aligned",
+      "crate": null,
+      "samples": 35
+    },
+    {
+      "symbol": "v8::internal::FactoryBase<v8::internal::Factory>::NewFixedArrayWithFiller(v8::internal::Handle<v8::internal::Map>, int, v8::internal::Handle<v8::internal::HeapObject>, v8::internal::AllocationType)",
+      "crate": "v8",
+      "samples": 35
+    },
+    {
+      "symbol": "Builtins_StrictEqual_Baseline",
+      "crate": null,
+      "samples": 34
+    },
+    {
+      "symbol": "v8::internal::LookupIterator::LookupIterator(v8::internal::Isolate*, v8::internal::Handle<v8::internal::Object>, v8::internal::Handle<v8::internal::Name>, unsigned long, v8::internal::Handle<v8::internal::Object>, v8::internal::LookupIterator::Configuration)",
+      "crate": "v8",
+      "samples": 34
+    },
+    {
+      "symbol": "<serde_json::value::Value as serde_core::ser::Serialize>::serialize::<&mut serde_json::ser::Serializer<&mut alloc::vec::Vec<u8>>>",
+      "crate": "serde_json",
+      "samples": 33
+    },
+    {
+      "symbol": "v8::internal::AstValueFactory::GetOneByteStringInternal(v8::base::Vector<unsigned char const>)",
+      "crate": "v8",
+      "samples": 32
+    },
+    {
+      "symbol": "void v8::internal::String::WriteToFlat<unsigned char>(v8::internal::Tagged<v8::internal::String>, unsigned char*, int, int, v8::internal::SharedStringAccessGuardIfNeeded const&) [clone .localalias]",
+      "crate": null,
+      "samples": 32
+    },
+    {
+      "symbol": "Builtins_FindOrderedHashSetEntry",
+      "crate": null,
+      "samples": 31
+    },
+    {
+      "symbol": "Builtins_StringSubstring",
+      "crate": null,
+      "samples": 30
+    },
+    {
+      "symbol": "Builtins_CallApiCallbackOptimizedNoProfiling",
+      "crate": null,
+      "samples": 30
+    },
+    {
+      "symbol": "void v8::internal::LookupIterator::NextInternal<true>(v8::internal::Tagged<v8::internal::Map>, v8::internal::Tagged<v8::internal::JSReceiver>)",
+      "crate": null,
+      "samples": 29
+    },
+    {
+      "symbol": "<rspack_core::module_graph::rollback::overlay_map::OverlayMap<rspack_core::dependency::dependency_id::DependencyId, rspack_core::module_graph::connection::ModuleGraphConnection, core::hash::BuildHasherDefault<rustc_hash::FxHasher>>>::get",
+      "crate": "rspack_core",
+      "samples": 29
+    },
+    {
+      "symbol": "Builtins_CallFunction_ReceiverIsAny",
+      "crate": null,
+      "samples": 28
+    },
+    {
+      "symbol": "v8::internal::(anonymous namespace)::ElementsAccessorBase<v8::internal::(anonymous namespace)::FastHoleyObjectElementsAccessor, v8::internal::(anonymous namespace)::ElementsKindTraits<(v8::internal::ElementsKind)3> >::Add(v8::internal::Handle<v8::internal::JSObject>, unsigned int, v8::internal::Handle<v8::internal::Object>, v8::internal::PropertyAttributes, unsigned int)",
+      "crate": "v8",
+      "samples": 28
+    },
+    {
+      "symbol": "v8::EscapableHandleScopeBase::EscapableHandleScopeBase(v8::Isolate*)",
+      "crate": "v8",
+      "samples": 28
+    },
+    {
+      "symbol": "v8::internal::Utf8DecoderBase<v8::internal::Utf8Decoder>::Utf8DecoderBase(v8::base::Vector<unsigned char const>)",
+      "crate": "v8",
+      "samples": 27
+    },
+    {
+      "symbol": "v8::internal::compiler::GraphReducer::Reduce(v8::internal::compiler::Node*)",
+      "crate": "v8",
+      "samples": 27
+    },
+    {
+      "symbol": "Builtins_SetConstructor",
+      "crate": null,
+      "samples": 27
+    },
+    {
+      "symbol": "<rspack_binding_api::module_graph_connection::ModuleGraphConnection>::module",
+      "crate": "rspack_binding_api",
+      "samples": 26
+    },
+    {
+      "symbol": "<napi::bindgen_runtime::module_register::PersistedPerInstanceHashMap<*mut core::ffi::c_void,",
+      "crate": "napi",
+      "samples": 26
+    },
+    {
+      "symbol": "Builtins_StringIndexOf",
+      "crate": null,
+      "samples": 26
+    },
+    {
+      "symbol": "v8::internal::JSObject::MigrateToMap(v8::internal::Isolate*, v8::internal::Handle<v8::internal::JSObject>, v8::internal::Handle<v8::internal::Map>, int)",
+      "crate": "v8",
+      "samples": 24
+    },
+    {
+      "symbol": "v8::internal::LookupIterator::FetchValue(v8::internal::AllocationPolicy) const",
+      "crate": "v8",
+      "samples": 24
+    },
+    {
+      "symbol": "v8::Value::ToObject(v8::Local<v8::Context>) const",
+      "crate": "v8",
+      "samples": 24
+    },
+    {
+      "symbol": "v8::internal::Object::CheckContextualStoreToJSGlobalObject(v8::internal::LookupIterator*, v8::Maybe<v8::internal::ShouldThrow>)",
+      "crate": "v8",
+      "samples": 24
+    },
+    {
+      "symbol": "v8::internal::Handle<v8::internal::String> v8::internal::StringTable::LookupKey<v8::internal::SequentialStringKey<unsigned char>, v8::internal::Isolate>(v8::internal::Isolate*, v8::internal::SequentialStringKey<unsigned char>*)",
+      "crate": "v8",
+      "samples": 23
+    },
+    {
+      "symbol": "v8::internal::HeapObject::SizeFromMap(v8::internal::Tagged<v8::internal::Map>) const",
+      "crate": "v8",
+      "samples": 23
+    },
+    {
+      "symbol": "Builtins_FindOrderedHashMapEntry",
+      "crate": null,
+      "samples": 23
+    },
+    {
+      "symbol": "v8::internal::JSObject::EnsureWritableFastElements(v8::internal::Handle<v8::internal::JSObject>)",
+      "crate": "v8",
+      "samples": 23
+    },
+    {
+      "symbol": "Builtins_KeyedLoadIC",
+      "crate": null,
+      "samples": 22
+    },
+    {
+      "symbol": "Builtins_ArrayTimSort",
+      "crate": null,
+      "samples": 22
+    },
+    {
+      "symbol": "<core::str::lossy::Utf8Chunks as core::iter::traits::iterator::Iterator>::next",
+      "crate": "core",
+      "samples": 21
+    },
+    {
+      "symbol": "mi_malloc_aligned",
+      "crate": null,
+      "samples": 21
+    },
+    {
+      "symbol": "v8::internal::AstValueFactory::GetString(unsigned int, bool, v8::base::Vector<unsigned char const>)",
+      "crate": "v8",
+      "samples": 20
+    },
+    {
+      "symbol": "void v8::internal::BodyDescriptorBase::IteratePointers<v8::internal::ScavengeVisitor>(v8::internal::Tagged<v8::internal::HeapObject>, int, int, v8::internal::ScavengeVisitor*)",
+      "crate": null,
+      "samples": 20
+    },
+    {
+      "symbol": "Builtins_CallFunction_ReceiverIsNullOrUndefined",
+      "crate": null,
+      "samples": 20
+    },
+    {
+      "symbol": "<napi::bindgen_runtime::callback_info::CallbackInfo<1>>::new",
+      "crate": "napi",
+      "samples": 20
+    },
+    {
+      "symbol": "v8::internal::MemoryChunk::GetHeap()",
+      "crate": "v8",
+      "samples": 20
+    },
+    {
+      "symbol": "Builtins_CreateDataProperty",
+      "crate": null,
+      "samples": 20
+    },
+    {
+      "symbol": "void v8::internal::BodyDescriptorBase::IteratePointers<v8::internal::IterateAndScavengePromotedObjectsVisitor>(v8::internal::Tagged<v8::internal::HeapObject>, int, int, v8::internal::IterateAndScavengePromotedObjectsVisitor*)",
+      "crate": null,
+      "samples": 19
+    },
+    {
+      "symbol": "v8::internal::TaggedArrayBase<v8::internal::FixedArray, v8::internal::TaggedArrayShape, v8::internal::HeapObject>::set(int, v8::internal::Tagged<v8::internal::Object>, v8::internal::WriteBarrierMode) [clone .constprop.0]",
+      "crate": "v8",
+      "samples": 19
+    },
+    {
+      "symbol": "Builtins_LoadGlobalIC",
+      "crate": null,
+      "samples": 19
+    },
+    {
+      "symbol": "<napi::bindgen_runtime::module_register::PersistedPerInstanceHashMap<alloc::string::String, *mut napi_sys::types::napi_ref__, rustc_hash::FxBuildHasher>>::borrow_mut::<napi::bindgen_runtime::module_register::get_class_constructor::{closure#0}::{closure#0}, core::option::Option<*mut napi_sys::types::napi_ref__>>",
+      "crate": "napi",
+      "samples": 19
+    },
+    {
+      "symbol": "v8impl::ReferenceWithFinalizer::Data()",
+      "crate": "v8impl",
+      "samples": 19
+    },
+    {
+      "symbol": "<rspack_binding_api::dependency::Dependency>::ids",
+      "crate": "rspack_binding_api",
+      "samples": 19
+    },
+    {
+      "symbol": "v8::internal::Factory::AllocateRawWithAllocationSite(v8::internal::Handle<v8::internal::Map>, v8::internal::AllocationType, v8::internal::Handle<v8::internal::AllocationSite>)",
+      "crate": "v8",
+      "samples": 18
+    },
+    {
+      "symbol": "__tls_get_addr",
+      "crate": null,
+      "samples": 18
+    },
+    {
+      "symbol": "void v8::internal::BodyDescriptorBase::IteratePointers<v8::internal::ConcurrentMarkingVisitor>(v8::internal::Tagged<v8::internal::HeapObject>, int, int, v8::internal::ConcurrentMarkingVisitor*)",
+      "crate": null,
+      "samples": 17
+    },
+    {
+      "symbol": "v8::internal::Sweeper::RawSweep(v8::internal::PageMetadata*, v8::internal::FreeSpaceTreatmentMode, v8::internal::Sweeper::SweepingMode, bool, bool)",
+      "crate": "v8",
+      "samples": 17
+    },
+    {
+      "symbol": "v8::internal::GlobalHandles::Create(v8::internal::Tagged<v8::internal::Object>)",
+      "crate": "v8",
+      "samples": 17
+    },
+    {
+      "symbol": "v8::internal::PretenuringHandler::UpdateAllocationSite(v8::internal::Tagged<v8::internal::Map>, v8::internal::Tagged<v8::internal::HeapObject>, std::unordered_map<v8::internal::Tagged<v8::internal::AllocationSite>, unsigned long, v8::internal::Object::Hasher, std::equal_to<v8::internal::Tagged<v8::internal::AllocationSite> >, std::allocator<std::pair<v8::internal::Tagged<v8::internal::AllocationSite> const, unsigned long> > >*)",
+      "crate": "v8",
+      "samples": 17
+    },
+    {
+      "symbol": "Builtins_RegExpPrototypeTestFast",
+      "crate": null,
+      "samples": 17
+    },
+    {
+      "symbol": "v8::Value::IsObject() const",
+      "crate": "v8",
+      "samples": 17
+    },
+    {
+      "symbol": "<&mut rspack_napi::js_values::one_shot_value_ref::OneShotRef as napi::bindgen_runtime::js_values::ToNapiValue>::to_napi_value",
+      "crate": null,
+      "samples": 17
+    }
+  ]
+}
