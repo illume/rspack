@@ -1295,6 +1295,118 @@ the long tail (and more hot fns inside `napi`) into the
 `#[optimize(speed)]` set without paying for a full
 `cargo vendor`.
 
+### Empirical run on the actual binding (selective vendor + per-fn `=speed` + workspace `=s`, same-runner baseline)
+
+Same recipe as the previous section, but with
+`--workspace-default s` instead of `z`. The motivation: the
+prior bench-shaped runs all reported +5.56% .. +13.28% median
+runtime regressions from the workspace `=z` default, and
+`opt-level = "s"` is the obvious next Pareto point — it
+typically lands close to `=z` on size while leaving
+`opt-level=3`-class loop optimisations enabled. This run also
+captures **a same-runner baseline rebuild** so the comparison
+isn't confounded by GitHub Actions runner variance (the
+previous baselines were captured on different VM
+allocations and turned out to be ~20% slower than the
+variant runner — see "Methodology" note below).
+
+Setup (this repo, x86\_64-linux,
+nightly-2026-04-16, full release flags):
+
+```bash
+# 1) Selective vendor of third-party hot crates (same as before).
+tsx .github/workflows/scripts/pgo-run.ts vendor \
+    --profile perf_profiles/6341b53a046ad6c1f3cd09a7dbf22bfa1af9eae6.json \
+    --threshold 0.95
+# → vendored napi@3.8.5 → vendor/napi
+
+# 2) Workspace-default = "s" (the new lever this section explores).
+tsx .github/workflows/scripts/pgo-run.ts apply \
+    --profile perf_profiles/6341b53a046ad6c1f3cd09a7dbf22bfa1af9eae6.json \
+    --workspace-default s --no-package-overrides
+
+# 3) [patch.crates-io] napi → vendor/napi + per-fn markers.
+tsx .github/workflows/scripts/pgo-run.ts patch \
+    --profile perf_profiles/6341b53a046ad6c1f3cd09a7dbf22bfa1af9eae6.json \
+    --threshold 0.95 --apply
+#   napi: 31 edit(s) across 25 file(s)
+#   [workspace] rspack_binding_api: 7 edit(s) across 7 file(s)
+#   [workspace] rspack_core:        31 edit(s) across 19 file(s)
+
+# 4) Build + bench, then revert + rebuild + re-bench baseline on the SAME runner.
+pnpm run build:binding:release   # 12m35s  → 41,317,672 B variant
+tsx .github/workflows/scripts/pgo-run.ts bench --label workspace-s-fns-speed-vendored
+# (cp the variant .node aside, revert all PGO edits)
+pnpm run build:binding:release   # 13m38s  → 53,007,144 B baseline (byte-identical to f185ae6d)
+tsx .github/workflows/scripts/pgo-run.ts bench --label baseline-same-runner
+```
+
+| Variant | `.node` bytes | MiB | Δ size | Median runtime Δ |
+| --- | ---: | ---: | ---: | ---: |
+| baseline-same-runner (`opt-level = 3`) | 53,007,144 | 50.55 | — | — |
+| **workspace-s-fns-speed-vendored** | **41,317,672** | **39.40** | **−22.05%** | **+0.18%** (mean +0.21%) |
+
+Per-benchmark deltas (negative = candidate faster):
+
+| Benchmark | Baseline (ms) | Candidate (ms) | Δ |
+| --- | ---: | ---: | ---: |
+| Traverse module graph by dependencies | 0.111 | 0.111 | +0.18% |
+| Traverse module graph by connections | 0.021 | 0.021 | +1.42% |
+| Traverse compilation.modules | 0.003 | 0.003 | −6.06% |
+| stats.toJson() | 3.498 | 3.517 | +0.55% |
+| collect imported identifiers | 0.013 | 0.013 | −0.76% |
+| record module | 0.069 | 0.070 | +1.90% |
+| is css mod | 0.004 | 0.004 | −2.33% |
+| record chunk group | 0.002 | 0.002 | +0.00% |
+| external getResolve | 0.165 | 0.177 | +7.03% |
+
+Bench JSONs:
+
+- `perf_profiles/bench-1b368467021ac0e10d769f6b244f4572a3c0c946-baseline-same-runner.json`
+- `perf_profiles/bench-1b368467021ac0e10d769f6b244f4572a3c0c946-workspace-s-fns-speed-vendored.json`
+
+**Honest read.** This is a much more attractive Pareto point
+than the workspace `=z` recipe in the previous section:
+**−22.05% binary size** (−11.69 MB) at essentially **zero
+median runtime change** (+0.18% sits well inside the
+single-sample bench noise — `record chunk group` reports
++0.00%, four other benches report negative deltas). The worst
+single bench is `external getResolve` at +7.03%, which is
+plausibly real (its workload is dominated by a NAPI
+round-trip into JS-land resolver code that the workspace
+`=s` change does affect indirectly), but the overall picture
+is a clear win for this workload.
+
+The `=z` vs `=s` tradeoff on this binding turns out to lean
+sharply toward `=s`: `=z` recovered an extra ~9MB of size on
+top of `=s` but at +13.28% median runtime, while `=s` keeps
+~78% of the size win for ~0% of the runtime cost. This
+matches the textbook Rust guidance — `=z` is aggressive
+enough to disable a lot of LLVM's loop and inlining
+optimisations that `=s` keeps.
+
+**Methodology note (runner variance).** The earlier
+sections in this PR compared candidate builds against
+baselines captured in different sessions on different
+GitHub Actions runner VMs. The same-runner baseline rebuild
+in this section is **byte-identical** to the
+`bench-f185ae6d…-baseline-vendored-recipe.json` from the
+previous session (53,007,144 bytes) — but on this runner
+the same binary benches **20–25% faster** across the board
+(e.g. `Traverse module graph by dependencies` 0.111 ms here
+vs 0.138 ms before, `stats.toJson()` 3.498 ms vs 4.682 ms).
+That cross-VM variance is larger than every PGO recipe
+delta we've measured in this PR. Comparisons across
+sessions on this PR's `9-sample, sd=NaN` CodSpeed-instrumented
+benches should therefore be treated as illustrative only —
+**conclusions about runtime impact require the candidate
+and baseline to be benched on the same runner**, as we did
+here. The `+5.56% .. +13.28%` numbers reported for the
+`=z` recipe in earlier sections are likely inflated by the
+same factor and the true `=z` runtime cost is probably
+materially smaller — but we don't have a same-runner
+baseline for that recipe and so can't yet quantify it.
+
 ### Vendor availability: `[patch.crates-io]` only emits redirections that exist
 
 `buildPatchPlan` checks `<repoRoot>/<vendor_root>/<name>/Cargo.toml`
